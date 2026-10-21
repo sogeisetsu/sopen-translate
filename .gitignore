@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+*.zip
+*.crx
+*.xpi
+
+# secrets — API keys must never be committed
+.env
+.env.*
+!.env.example
+keys.json
+secrets.json
+
+# tooling / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log
