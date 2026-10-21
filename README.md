@@ -13,7 +13,7 @@
 
 - Manifest V3，只针对 Chrome / Edge，不做 Firefox 兼容
 - 无后端、无构建步骤：源码目录就是可加载的扩展，纯 ES module + 原生 DOM
-- 无运行时依赖，不装 npm 包
+- 无运行时依赖；npm 只用来跑类型检查（`npm run check`），不参与扩展加载
 - 密钥只存 `chrome.storage.local`，只有 service worker 读取，content script 拿不到
 - 出网只发生在 service worker 里，content script 只负责 DOM
 
@@ -30,6 +30,13 @@ extension/              # chrome://extensions 里直接加载这个目录
   lib/
     settings.js         # chrome.storage.local 读写 + 默认值
     providers.js        # 翻译服务适配层（类型、字段、translate 实现）
+```
+
+仓库根另有 `tsconfig.json` 和 `types.d.ts`，只给 `checkJs` 静态检查用，不随扩展加载。类型写在 JSDoc 里，源码本身仍是可读可调试的 JS。
+
+```
+npm install      # 只为类型检查装 typescript + @types/chrome
+npm run check    # tsc --noEmit，改完应当零错误
 ```
 
 ## 安装

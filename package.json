@@ -1,0 +1,12 @@
+{
+  "name": "sopen-translate",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p ."
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.3.6",
+    "typescript": "^7.0.2"
+  }
+}

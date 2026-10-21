@@ -1,12 +1,12 @@
 # AGENTS.md
 
-MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可加载产物：无构建、无依赖、无测试框架、无 CI。
+MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可加载产物：无构建、无运行时依赖、无测试框架、无 CI。
 
 ## 已拍板的决定（别推翻）
 
 - 只做整页翻译。划词翻译被用户明确否掉，别加回来。
 - 只支持 Chrome / Edge（MV3），不做 Firefox 兼容。
-- 不用 TypeScript、不用打包工具、不装 npm 依赖。没有任何 `package.json`。
+- 不用 TypeScript 写源码，也不用打包工具。类型靠 JSDoc + `checkJs` 静态检查（`npm run check`），浏览器加载的仍是 `extension/` 里的原始 `.js`，不存在构建产物。`package.json` 里只有 `typescript`、`@types/chrome` 两个 devDependency。
 - 无后端：请求由 service worker 直接发往用户在设置页填的接口地址。
 
 ## 分层与硬约束
@@ -24,7 +24,8 @@ MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可�
 
 ## 验证（没有自动化测试）
 
-- `node --check extension/<file>.js` —— Node 22 自带语法检测，ESM 文件也能过，改完每个文件都跑一遍。
+- `npm run check` —— `tsc --noEmit`（`checkJs` 模式）。改完必须零错误，这是唯一能自动拦住契约漂移的手段。
+- `node --check extension/<file>.js` —— 单独确认某个文件语法（Node 22 自带语法检测，ESM 也能过）。
 - `Get-Content extension\manifest.json -Raw | ConvertFrom-Json` —— 验 manifest 结构合法。
 - provider 层可脱离浏览器测：stub `globalThis.fetch` 后 `import` `lib/providers.js` 直接调 `translate()`，覆盖正常返回、代码块包裹的 JSON、接口拒绝 `response_format`、分段数不符。
 - 真机只能手工：`chrome://extensions` 加载 `extension/` 目录。**没有真实密钥就没法验证端到端**，别声称跑通了。
@@ -35,5 +36,7 @@ MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可�
 - 整页翻译按 1200 字符 / 20 段分批串行发送；第一批全失败立即中止，避免留下半页译文。改动别破坏这个语义。
 - `host_permissions: <all_urls>` 和 content script 的 `<all_urls>` 是必要的——接口地址由用户自己填，别收窄成固定域名。
 - 只在顶层 frame 生效（`all_frames: false`），是有意为之。
+- 类型声明集中在仓库根的 `types.d.ts`，JSDoc 里用 `import('../../types')` 引用；它不会被扩展加载，别挪进 `extension/`。
+- `tsconfig.json` 里 `noImplicitAny: false` 是故意的：未注解的参数太多，开了只会刷屏。真正起作用的是 `strictNullChecks` 和 provider 契约检查，别顺手打开。
 
 行为变化时同步更新 `README.md`，它同时是对外说明。

@@ -1,15 +1,17 @@
 /**
  * 翻译服务适配层。
  *
- * 每个 provider 实现：
+ * 每个 provider 实现 ProviderType（见 types.d.ts）：
  *   type        唯一标识
  *   label       设置页显示名
  *   hint        设置页说明
- *   fields      设置页要渲染的字段 [{ key, label, placeholder, secret, required }]
- *   translate({ texts, config, target, targetCode, signal }) -> string[]
+ *   fields      设置页要渲染的字段
+ *   translate   输入 n 条文本，必须原序返回 n 条
  *
- * 约定：输入 n 条文本，必须返回 n 条，顺序一致。数量对不上直接报错，
- * 宁可失败也不要把翻译错位写回页面。
+ * 约定：数量对不上直接报错，宁可失败也不要把翻译错位写回页面。
+ *
+ * @typedef {import('../../types').ProviderType} ProviderType
+ * @typedef {import('../../types').ProviderConfig} ProviderConfig
  */
 
 class ProviderError extends Error {
@@ -19,8 +21,17 @@ class ProviderError extends Error {
   }
 }
 
+/**
+ * @param {string} message
+ * @returns {never}
+ */
 function fail(message) {
   throw new ProviderError(message);
+}
+
+/** @param {unknown} err @returns {string} */
+function messageOf(err) {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function trimSlash(url = '') {
@@ -32,14 +43,20 @@ function clip(text = '', max = 240) {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
+/**
+ * @param {string} url
+ * @param {{ headers: Record<string, string>, body: unknown, signal?: AbortSignal }} init
+ * @returns {Promise<any>}
+ */
 async function postJson(url, { headers, body, signal }) {
   let res;
   try {
     res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
   } catch (err) {
-    if (err?.name === 'AbortError') fail('请求已取消');
-    fail(`无法连接 ${url}：${err?.message || err}`);
+    if (err instanceof Error && err.name === 'AbortError') fail('请求已取消');
+    fail(`无法连接 ${url}：${messageOf(err)}`);
   }
+
   const raw = await res.text();
   if (!res.ok) fail(`HTTP ${res.status}：${clip(raw) || res.statusText}`);
   try {
@@ -56,15 +73,18 @@ const SYSTEM_PROMPT = (target) =>
   `要求：返回的数组长度、顺序与原数组完全一致；不合并、不拆分、不省略、不添加解释；` +
   `每一段只输出译文本身，不要保留原文。只返回 JSON 对象 {"segments": [...]}，不要代码块。`;
 
-/** 从模型返回里抠出数组，兼容 ```json 包裹和多余前后缀 */
-function parseSegments(content, expected) {
+/**
+ * 从模型返回里抠出数组，兼容代码块包裹和多余前后缀
+ * @param {string} content
+ * @returns {string[]}
+ */
+function parseSegments(content) {
   if (!content) fail('模型返回为空');
 
-  const candidates = [];
-  candidates.push(content);
+  const candidates = [content];
 
   const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced) candidates.push(fenced[1]);
+  if (fenced?.[1]) candidates.push(fenced[1]);
 
   const first = content.indexOf('{');
   const last = content.lastIndexOf('}');
@@ -82,6 +102,7 @@ function parseSegments(content, expected) {
   fail(`无法解析模型返回：${clip(content)}`);
 }
 
+/** @type {ProviderType} */
 const openai = {
   type: 'openai',
   label: 'OpenAI 兼容接口',
@@ -93,6 +114,8 @@ const openai = {
   ],
   async translate({ texts, config, target, signal }) {
     const endpoint = `${trimSlash(config.baseUrl)}/chat/completions`;
+
+    /** @type {Record<string, string>} */
     const headers = { 'Content-Type': 'application/json' };
     if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
 
@@ -105,6 +128,7 @@ const openai = {
       ],
     };
 
+    /** @type {any} */
     let data;
     try {
       // 优先要求 JSON 输出；部分兼容实现不认这个参数，失败一次再去掉重试
@@ -114,11 +138,11 @@ const openai = {
         signal,
       });
     } catch (err) {
-      if (!/HTTP 4\d\d/.test(err.message)) throw err;
+      if (!/HTTP 4\d\d/.test(messageOf(err))) throw err;
       data = await postJson(endpoint, { headers, body: base, signal });
     }
 
-    const segments = parseSegments(data?.choices?.[0]?.message?.content, texts.length);
+    const segments = parseSegments(data?.choices?.[0]?.message?.content);
     if (segments.length !== texts.length) {
       fail(`返回分段数不符：期望 ${texts.length}，实际 ${segments.length}`);
     }
@@ -128,6 +152,7 @@ const openai = {
 
 /* --------------------------------- DeepL --------------------------------- */
 
+/** @type {ProviderType} */
 const deepl = {
   type: 'deepl',
   label: 'DeepL',
@@ -141,7 +166,7 @@ const deepl = {
     const data = await postJson(endpoint, {
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `DeepL-Auth-Key ${config.apiKey}`,
+        Authorization: `DeepL-Auth-Key ${config.apiKey ?? ''}`,
       },
       body: { text: texts, target_lang: targetCode || 'ZH' },
       signal,
@@ -152,14 +177,19 @@ const deepl = {
     if (list.length !== texts.length) {
       fail(`返回分段数不符：期望 ${texts.length}，实际 ${list.length}`);
     }
-    return list.map((item) => String(item?.text ?? ''));
+    return list.map((/** @type {any} */ item) => String(item?.text ?? ''));
   },
 };
 
 /* -------------------------------- 注册表 -------------------------------- */
 
+/** @type {ProviderType[]} */
 export const PROVIDER_TYPES = [openai, deepl];
 
+/**
+ * @param {string} type
+ * @returns {ProviderType}
+ */
 export function getProviderType(type) {
   const found = PROVIDER_TYPES.find((p) => p.type === type);
   if (!found) fail(`未知的翻译服务类型：${type}`);

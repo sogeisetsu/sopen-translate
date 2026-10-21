@@ -5,8 +5,9 @@
  */
 
 (() => {
-  if (window.__sopenTranslateLoaded) return;
-  window.__sopenTranslateLoaded = true;
+  const win = /** @type {Window & { __sopenTranslateLoaded?: boolean }} */ (window);
+  if (win.__sopenTranslateLoaded) return;
+  win.__sopenTranslateLoaded = true;
 
   const SKIP_TAGS = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'CODE', 'PRE',
@@ -19,10 +20,17 @@
   /** @type {{ node: Text, text: string }[]} */
   let originals = [];
   let busy = false;
+
+  /** @type {HTMLDivElement | null} */
   let toastEl = null;
+  let toastTimer = 0;
+
+  /** @param {unknown} err @returns {string} */
+  const errorText = (err) => (err instanceof Error ? err.message : String(err));
 
   /* ------------------------------- 后台调用 ------------------------------- */
 
+  /** @param {string[]} texts @returns {Promise<string[]>} */
   async function requestTranslate(texts) {
     const res = await chrome.runtime.sendMessage({ type: 'translate', texts });
     if (!res) throw new Error('扩展后台没有响应，重新加载一下扩展');
@@ -32,6 +40,7 @@
 
   /* --------------------------------- 状态条 -------------------------------- */
 
+  /** @returns {HTMLDivElement} */
   function ensureToast() {
     if (toastEl?.isConnected) return toastEl;
 
@@ -47,13 +56,17 @@
     return toastEl;
   }
 
+  /**
+   * @param {string} text
+   * @param {{ error?: boolean, timeout?: number }} [options]
+   */
   function showToast(text, { error = false, timeout = 0 } = {}) {
     const el = ensureToast();
     el.textContent = text;
     el.hidden = false;
     el.classList.toggle('is-error', error);
-    clearTimeout(showToast.timer);
-    if (timeout) showToast.timer = setTimeout(() => (el.hidden = true), timeout);
+    clearTimeout(toastTimer);
+    if (timeout) toastTimer = setTimeout(() => (el.hidden = true), timeout);
   }
 
   function hideToast() {
@@ -62,7 +75,12 @@
 
   /* ------------------------------ 文本节点收集 ------------------------------ */
 
+  /**
+   * @param {Element} [root]
+   * @returns {Text[]}
+   */
   function collectTextNodes(root = document.body) {
+    /** @type {Text[]} */
     const nodes = [];
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
@@ -78,18 +96,24 @@
       },
     });
 
-    while (walker.nextNode()) nodes.push(walker.currentNode);
+    while (walker.nextNode()) nodes.push(/** @type {Text} */ (walker.currentNode));
     return nodes;
   }
 
-  /** 按字符预算把节点切成批，尽量不打断段落语境 */
+  /**
+   * 按字符预算把节点切成批，尽量不打断段落语境
+   * @param {Text[]} nodes
+   * @returns {Text[][]}
+   */
   function batchNodes(nodes) {
+    /** @type {Text[][]} */
     const batches = [];
+    /** @type {Text[]} */
     let current = [];
     let chars = 0;
 
     for (const node of nodes) {
-      const len = node.nodeValue.trim().length;
+      const len = (node.nodeValue || '').trim().length;
       if (current.length > 0 && (chars + len > BATCH_CHARS || current.length >= BATCH_ITEMS)) {
         batches.push(current);
         current = [];
@@ -120,9 +144,10 @@
 
     try {
       for (const batch of batches) {
-        const texts = batch.map((node) => node.nodeValue.trim());
+        const texts = batch.map((node) => (node.nodeValue || '').trim());
         showToast(`翻译中 ${done}/${nodes.length}…`);
 
+        /** @type {string[]} */
         let translations;
         try {
           translations = await requestTranslate(texts);
@@ -136,9 +161,9 @@
 
         batch.forEach((node, index) => {
           const next = translations[index];
+          const from = node.nodeValue || '';
           if (typeof next !== 'string' || !next.trim()) return;
-          if (next.trim() === node.nodeValue.trim()) return;
-          const from = node.nodeValue;
+          if (next.trim() === from.trim()) return;
           node.nodeValue = from.replace(from.trim(), next.trim());
           originals.push({ node, text: from });
         });
@@ -151,8 +176,8 @@
       });
       return { ok: true, translated: originals.length, failed };
     } catch (err) {
-      showToast(`翻译失败：${err.message}`, { error: true, timeout: 5000 });
-      return { ok: false, error: err.message };
+      showToast(`翻译失败：${errorText(err)}`, { error: true, timeout: 5000 });
+      return { ok: false, error: errorText(err) };
     } finally {
       busy = false;
     }

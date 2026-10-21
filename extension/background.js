@@ -6,6 +6,8 @@
 import { getActiveProvider, getSettings } from './lib/settings.js';
 import { getProviderType } from './lib/providers.js';
 
+/** @typedef {import('../types').ProviderConfig} ProviderConfig */
+
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   if (reason !== 'install') return;
   const settings = await getSettings();
@@ -40,6 +42,7 @@ function normalizeTexts(texts) {
   return texts.map((t) => String(t ?? ''));
 }
 
+/** @param {string[]} texts */
 async function translate(texts) {
   const list = normalizeTexts(texts);
   const { settings, provider } = await getActiveProvider();
@@ -59,6 +62,10 @@ async function translate(texts) {
   return { ok: true, translations };
 }
 
+/**
+ * @param {ProviderConfig} config
+ * @param {string} [sample]
+ */
 async function testProvider(config, sample) {
   if (!config) throw new Error('缺少服务配置');
   const settings = await getSettings();
