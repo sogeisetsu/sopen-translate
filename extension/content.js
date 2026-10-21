@@ -1,7 +1,7 @@
 /**
- * Content script：只负责 DOM。
- * 全页翻译走 TreeWalker 收集文本节点，按字符预算分批交给 background，
- * 原文存起来，随时可以还原。
+ * Content script：只做整页翻译。
+ * 用 TreeWalker 收集文本节点，按字符预算分批交给 background，
+ * 原文留一份，随时可还原。
  */
 
 (() => {
@@ -19,7 +19,7 @@
   /** @type {{ node: Text, text: string }[]} */
   let originals = [];
   let busy = false;
-  let ui = null;
+  let toastEl = null;
 
   /* ------------------------------- 后台调用 ------------------------------- */
 
@@ -30,145 +30,37 @@
     return res.translations;
   }
 
-  /* --------------------------------- UI --------------------------------- */
+  /* --------------------------------- 状态条 -------------------------------- */
 
-  function ensureUi() {
-    if (ui) return ui;
+  function ensureToast() {
+    if (toastEl?.isConnected) return toastEl;
 
     const host = document.createElement('div');
     host.id = 'sopen-translate-ui';
-    host.addEventListener('mousedown', (e) => e.stopPropagation());
-    host.addEventListener('mouseup', (e) => e.stopPropagation());
 
-    const toast = document.createElement('div');
-    toast.className = 'sopen-toast';
-    toast.hidden = true;
+    toastEl = document.createElement('div');
+    toastEl.className = 'sopen-toast';
+    toastEl.hidden = true;
 
-    const bubble = document.createElement('button');
-    bubble.className = 'sopen-bubble';
-    bubble.type = 'button';
-    bubble.textContent = '译';
-    bubble.hidden = true;
-
-    const panel = document.createElement('div');
-    panel.className = 'sopen-panel';
-    panel.hidden = true;
-    panel.innerHTML =
-      '<div class="sopen-panel-head"><span class="sopen-panel-title">翻译</span>' +
-      '<button type="button" class="sopen-close" aria-label="关闭">×</button></div>' +
-      '<div class="sopen-panel-body"></div>';
-
-    host.append(bubble, panel, toast);
+    host.append(toastEl);
     document.documentElement.appendChild(host);
-
-    ui = { host, toast, bubble, panel, body: panel.querySelector('.sopen-panel-body') };
-    ui.panel.querySelector('.sopen-close').addEventListener('click', () => hidePanel());
-    bubble.addEventListener('click', () => {
-      const text = bubble.dataset.text || '';
-      const rect = JSON.parse(bubble.dataset.rect || '{"top":0,"bottom":40,"left":0}');
-      hideBubble();
-      if (text) showPanelTranslation(text, rect);
-    });
-
-    return ui;
-  }
-
-  function isOurs(target) {
-    return !!(target && target.closest && target.closest('#sopen-translate-ui'));
+    return toastEl;
   }
 
   function showToast(text, { error = false, timeout = 0 } = {}) {
-    const { toast } = ensureUi();
-    toast.textContent = text;
-    toast.hidden = false;
-    toast.classList.toggle('is-error', error);
+    const el = ensureToast();
+    el.textContent = text;
+    el.hidden = false;
+    el.classList.toggle('is-error', error);
     clearTimeout(showToast.timer);
-    if (timeout) showToast.timer = setTimeout(() => (toast.hidden = true), timeout);
+    if (timeout) showToast.timer = setTimeout(() => (el.hidden = true), timeout);
   }
 
   function hideToast() {
-    if (ui) ui.toast.hidden = true;
+    if (toastEl) toastEl.hidden = true;
   }
 
-  function showBubble(rect, text) {
-    const { bubble } = ensureUi();
-    bubble.dataset.text = text;
-    bubble.dataset.rect = JSON.stringify({
-      top: rect.top,
-      bottom: rect.bottom,
-      left: rect.left,
-    });
-    bubble.hidden = false;
-    const top = Math.max(8, rect.top - 34);
-    const left = Math.min(window.innerWidth - 44, Math.max(8, rect.left + rect.width / 2 - 14));
-    bubble.style.top = `${top}px`;
-    bubble.style.left = `${left}px`;
-  }
-
-  function hideBubble() {
-    if (ui) {
-      ui.bubble.hidden = true;
-      ui.bubble.dataset.text = '';
-    }
-  }
-
-  function showPanel(anchorRect, content) {
-    const { panel, body } = ensureUi();
-    body.replaceChildren();
-    if (typeof content === 'string') body.textContent = content;
-    else body.append(content);
-
-    panel.hidden = false;
-    panel.style.top = `${Math.min(window.innerHeight - 140, anchorRect.bottom + 10)}px`;
-    panel.style.left = `${Math.max(8, Math.min(window.innerWidth - 360, anchorRect.left))}px`;
-  }
-
-  function hidePanel() {
-    if (ui) ui.panel.hidden = true;
-  }
-
-  async function showPanelTranslation(text, rect) {
-    const loading = document.createElement('span');
-    loading.className = 'sopen-loading';
-    loading.textContent = '翻译中…';
-    showPanel(rect, loading);
-
-    try {
-      const [translated] = await requestTranslate([text]);
-      showPanel(rect, translated);
-    } catch (err) {
-      showPanel(rect, `翻译失败：${err.message}`);
-    }
-  }
-
-  /* ------------------------------ 划词翻译 ------------------------------ */
-
-  document.addEventListener('mouseup', (event) => {
-    if (isOurs(event.target)) return;
-
-    const selection = window.getSelection();
-    const text = selection?.toString().trim() || '';
-    if (text.length < MIN_TEXT_LEN || !selection.rangeCount) {
-      hideBubble();
-      return;
-    }
-
-    const rect = selection.getRangeAt(0).getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) {
-      hideBubble();
-      return;
-    }
-    showBubble(rect, text);
-  });
-
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      hideBubble();
-      hidePanel();
-    }
-  });
-
-  /* ------------------------------ 整页翻译 ------------------------------ */
+  /* ------------------------------ 文本节点收集 ------------------------------ */
 
   function collectTextNodes(root = document.body) {
     const nodes = [];
@@ -209,6 +101,8 @@
     if (current.length) batches.push(current);
     return batches;
   }
+
+  /* ------------------------------- 整页翻译 ------------------------------- */
 
   async function translatePage() {
     if (busy) return { ok: false, error: '正在翻译中' };
@@ -252,7 +146,9 @@
         done += batch.length;
       }
 
-      showToast(`已翻译 ${originals.length} 段${failed ? `，${failed} 段失败` : ''}`, { timeout: 3000 });
+      showToast(`已翻译 ${originals.length} 段${failed ? `，${failed} 段失败` : ''}`, {
+        timeout: 3000,
+      });
       return { ok: true, translated: originals.length, failed };
     } catch (err) {
       showToast(`翻译失败：${err.message}`, { error: true, timeout: 5000 });
