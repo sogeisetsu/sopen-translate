@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>sopen-translate 设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-head">
+        <h1>sopen-translate</h1>
+        <p class="muted">
+          密钥只保存在这台设备的浏览器本地（<code>chrome.storage.local</code>），
+          不上传、不同步、不写日志。
+        </p>
+      </header>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>翻译服务</h2>
+          <span id="provider-count" class="muted"></span>
+        </div>
+        <div id="providers" class="providers"></div>
+        <div class="add-row">
+          <select id="add-type" class="input"></select>
+          <button id="add" class="btn" type="button">添加服务</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>目标语言</h2>
+        </div>
+        <div class="grid">
+          <label class="field">
+            <span>语言名称（给大模型用）</span>
+            <input id="target-lang" class="input" placeholder="简体中文" />
+          </label>
+          <label class="field">
+            <span>语言代码（DeepL 用）</span>
+            <input id="target-lang-code" class="input" placeholder="ZH" />
+          </label>
+        </div>
+      </section>
+
+      <footer class="foot">
+        <button id="save" class="btn primary" type="button">保存设置</button>
+        <span id="save-message" class="muted" role="status"></span>
+      </footer>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

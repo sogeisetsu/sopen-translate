@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "sopen-translate",
+  "version": "0.1.0",
+  "description": "轻量网页翻译：整页与划词翻译，翻译服务和 API 密钥由你自己配置。",
+  "permissions": ["storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "sopen-translate",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

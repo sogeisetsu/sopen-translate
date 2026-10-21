@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>sopen-translate</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="head">
+      <strong class="brand">sopen-translate</strong>
+      <span id="provider" class="muted">读取中…</span>
+    </header>
+
+    <div class="actions">
+      <button id="translate" class="btn primary" type="button">翻译此页</button>
+      <button id="restore" class="btn" type="button">还原</button>
+    </div>
+
+    <p id="message" class="muted" role="status"></p>
+
+    <footer class="foot">
+      <a id="open-options" href="#">设置</a>
+      <span id="target" class="muted"></span>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
