@@ -38,6 +38,7 @@ extension/              # chrome://extensions 里直接加载这个目录
 npm install      # 只为类型检查装 typescript + @types/chrome
 npm run check    # tsc --noEmit，改完应当零错误
 npm run smoke    # provider 契约冒烟测试：stub fetch，不联网、不需要密钥
+npm run smoke:dom # content script 状态机：假 DOM + 两轮翻译还原
 ```
 
 ## 安装
@@ -64,7 +65,7 @@ npm run smoke    # provider 契约冒烟测试：stub fetch，不联网、不需
   label: '显示名',
   hint: '设置页说明',
   fields: [{ key: 'apiKey', label: 'API Key', secret: true, required: true }],
-  async translate({ texts, config, target, targetCode, signal }) {
+  async translate({ texts, config, target, targetCode }) {
     // 必须按输入顺序返回同样数量的字符串
     return texts;
   },
@@ -78,6 +79,7 @@ npm run smoke    # provider 契约冒烟测试：stub fetch，不联网、不需
 - 已实现：整页翻译（按字符预算分批）、还原原文、多服务管理、连通性测试
 - 未实现：翻译缓存、原文/译文对照、快捷键、按站点开关、接口用量统计
 - 已知限制：只在顶层 frame 生效；不分段保留页面内联标签的结构；超长页面会串行发多批请求
+- 行为说明：每一轮翻译都从原文出发，开始时会先撤销上一轮的译文。如果新一轮第一批就失败（例如密钥失效），页面会停在原文，上一轮译文不再恢复
 
 ## 状态
 

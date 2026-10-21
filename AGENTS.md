@@ -28,6 +28,7 @@ MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可�
 - `node --check extension/<file>.js` —— 单独确认某个文件语法（Node 22 自带语法检测，ESM 也能过）。
 - `Get-Content extension\manifest.json -Raw | ConvertFrom-Json` —— 验 manifest 结构合法。
 - provider 层冒烟测试：`npm run smoke`（`scripts/smoke.mjs`，stub `globalThis.fetch`，不联网）覆盖正常返回、代码块包裹、接口拒绝 `response_format` 时回退、分段数不符、无法解析、HTTP 错误、连接失败。改动 provider 后必须重跑。
+- content script 状态机冒烟测试：`npm run smoke:dom`（`scripts/dom-smoke.mjs`，用最小假 DOM 加载真实 `content.js`），覆盖"两轮翻译后还原回到原文"、翻译中拒绝还原、pre/过短文本跳过。改状态机后必须重跑。
 - 真机只能手工：`chrome://extensions` 加载 `extension/` 目录。**没有真实密钥就没法验证端到端**，别声称跑通了。
 
 ## 容易踩的点

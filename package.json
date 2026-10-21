@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "check": "tsc -p .",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:dom": "node scripts/dom-smoke.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.3.6",

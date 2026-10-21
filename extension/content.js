@@ -189,7 +189,6 @@
           continue;
         }
 
-        const before = originals.length;
         batch.forEach((node, position) => {
           const next = translations[position];
           const from = node.nodeValue || '';
@@ -197,8 +196,8 @@
           if (next.trim() === from.trim()) return;
           node.nodeValue = from.replace(from.trim(), next.trim());
           originals.push({ node, text: from });
+          translated += 1;
         });
-        translated += originals.length - before;
 
         done += batch.length;
       }

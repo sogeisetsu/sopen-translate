@@ -262,9 +262,13 @@ saveBtn.addEventListener('click', async () => {
     .map((provider) => ({ provider, missing: missingRequired(provider) }))
     .filter((entry) => entry.missing.length > 0);
   if (invalid.length > 0) {
-    const [first] = invalid;
-    const name = first.provider.label || getProviderType(first.provider.type).label;
-    setSaved(`「${name}」缺少必填项：${first.missing.join('、')}`, true);
+    const detail = invalid
+      .map(({ provider, missing }) => {
+        const name = provider.label || getProviderType(provider.type).label;
+        return `${name}（缺 ${missing.join('、')}）`;
+      })
+      .join('；');
+    setSaved(`还有没填完的服务：${detail}`, true);
     return;
   }
 
