@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc -p ."
+    "check": "tsc -p .",
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.3.6",

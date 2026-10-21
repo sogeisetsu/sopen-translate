@@ -37,6 +37,7 @@ extension/              # chrome://extensions 里直接加载这个目录
 ```
 npm install      # 只为类型检查装 typescript + @types/chrome
 npm run check    # tsc --noEmit，改完应当零错误
+npm run smoke    # provider 契约冒烟测试：stub fetch，不联网、不需要密钥
 ```
 
 ## 安装

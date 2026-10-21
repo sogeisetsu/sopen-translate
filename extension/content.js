@@ -2,6 +2,9 @@
  * Content script：只做整页翻译。
  * 用 TreeWalker 收集文本节点，按字符预算分批交给 background，
  * 原文留一份，随时可还原。
+ *
+ * 不变量：每一轮翻译都从「原文」出发——开始前先把上一轮的改动还原掉。
+ * 否则 originals 里会混进译文，还原时就回不到原文了。
  */
 
 (() => {
@@ -49,6 +52,8 @@
 
     toastEl = document.createElement('div');
     toastEl.className = 'sopen-toast';
+    toastEl.setAttribute('role', 'status');
+    toastEl.setAttribute('aria-live', 'polite');
     toastEl.hidden = true;
 
     host.append(toastEl);
@@ -126,10 +131,33 @@
     return batches;
   }
 
+  /* ------------------------------- 还原 ------------------------------- */
+
+  /**
+   * 把记录回写到页面并清空记录，返回还原的段数。
+   * 已脱离文档的节点同样可以赋值，不会抛错。
+   */
+  function applyRestore() {
+    const count = originals.length;
+    for (const { node, text } of originals) node.nodeValue = text;
+    originals = [];
+    return count;
+  }
+
+  function restorePage() {
+    if (busy) return { ok: false, error: '正在翻译中，等这一轮结束再还原' };
+    const count = applyRestore();
+    hideToast();
+    return { ok: true, restored: count };
+  }
+
   /* ------------------------------- 整页翻译 ------------------------------- */
 
   async function translatePage() {
     if (busy) return { ok: false, error: '正在翻译中' };
+
+    // 每轮都从原文出发：上一轮没还原就先还原，避免译文被二次翻译
+    if (originals.length > 0) applyRestore();
 
     const nodes = collectTextNodes();
     if (nodes.length === 0) {
@@ -141,9 +169,11 @@
     const batches = batchNodes(nodes);
     let done = 0;
     let failed = 0;
+    let translated = 0;
 
     try {
-      for (const batch of batches) {
+      for (let index = 0; index < batches.length; index += 1) {
+        const batch = batches[index];
         const texts = batch.map((node) => (node.nodeValue || '').trim());
         showToast(`翻译中 ${done}/${nodes.length}…`);
 
@@ -154,47 +184,35 @@
         } catch (err) {
           failed += batch.length;
           done += batch.length;
-          // 一段都没翻成时直接放弃：多半是配置问题，别把半页留着耗额度
-          if (originals.length === 0) throw err;
+          // 只有第一批失败才中止：多半是配置问题，别把整页都跑一遍无效请求
+          if (index === 0) throw err;
           continue;
         }
 
-        batch.forEach((node, index) => {
-          const next = translations[index];
+        const before = originals.length;
+        batch.forEach((node, position) => {
+          const next = translations[position];
           const from = node.nodeValue || '';
           if (typeof next !== 'string' || !next.trim()) return;
           if (next.trim() === from.trim()) return;
           node.nodeValue = from.replace(from.trim(), next.trim());
           originals.push({ node, text: from });
         });
+        translated += originals.length - before;
 
         done += batch.length;
       }
 
-      showToast(`已翻译 ${originals.length} 段${failed ? `，${failed} 段失败` : ''}`, {
+      showToast(`已翻译 ${translated} 段${failed ? `，${failed} 段失败` : ''}`, {
         timeout: 3000,
       });
-      return { ok: true, translated: originals.length, failed };
+      return { ok: true, translated, failed };
     } catch (err) {
       showToast(`翻译失败：${errorText(err)}`, { error: true, timeout: 5000 });
       return { ok: false, error: errorText(err) };
     } finally {
       busy = false;
     }
-  }
-
-  function restorePage() {
-    for (const { node, text } of originals) {
-      try {
-        node.nodeValue = text;
-      } catch {
-        /* 节点可能已被页面移除 */
-      }
-    }
-    const count = originals.length;
-    originals = [];
-    hideToast();
-    return { ok: true, restored: count };
   }
 
   /* ------------------------------- 消息入口 ------------------------------- */

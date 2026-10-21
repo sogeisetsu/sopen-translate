@@ -25,7 +25,6 @@ export interface TranslateArgs {
   config: ProviderConfig;
   target: string;
   targetCode: string;
-  signal?: AbortSignal;
 }
 
 export interface FieldSpec {

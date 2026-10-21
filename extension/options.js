@@ -44,10 +44,24 @@ function h(tag, props = {}, ...children) {
     if (key === 'class') node.className = value;
     else if (key === 'dataset') Object.assign(node.dataset, value);
     else if (key === 'text') node.textContent = value;
+    else if (key.startsWith('aria-') || key === 'role') node.setAttribute(key, String(value));
     else node[key] = value;
   }
   node.append(...children.filter((child) => child != null));
   return node;
+}
+
+/**
+ * 按 provider 类型声明检查必填字段
+ * @param {ProviderConfig} provider
+ * @returns {string[]} 缺失字段的标签，空数组表示通过
+ */
+function missingRequired(provider) {
+  const type = getProviderType(provider.type);
+  const values = /** @type {Record<string, any>} */ (provider);
+  return type.fields
+    .filter((field) => field.required && !String(values[field.key] ?? '').trim())
+    .map((field) => field.label);
 }
 
 function setSaved(text, isError = false) {
@@ -72,6 +86,7 @@ function providerCard(provider, index) {
       class: 'input name',
       value: provider.label || type.label,
       placeholder: '区分用的名字',
+      'aria-label': '服务名称',
       dataset: { index, field: 'label' },
     }),
     h('span', { class: 'badge', text: type.label }),
@@ -194,6 +209,14 @@ providersEl.addEventListener('click', async (event) => {
       button.parentElement?.querySelector('.result') ?? null
     );
     if (!result) return;
+
+    const missing = missingRequired(provider);
+    if (missing.length > 0) {
+      result.textContent = `缺少必填项：${missing.join('、')}`;
+      result.classList.add('is-error');
+      return;
+    }
+
     result.textContent = '测试中…';
     result.classList.remove('is-error');
     button.disabled = true;
@@ -234,6 +257,16 @@ saveBtn.addEventListener('click', async () => {
   const draft = getDraft();
   draft.targetLang = targetLangEl.value.trim() || '简体中文';
   draft.targetLangCode = targetLangCodeEl.value.trim().toUpperCase() || 'ZH';
+
+  const invalid = draft.providers
+    .map((provider) => ({ provider, missing: missingRequired(provider) }))
+    .filter((entry) => entry.missing.length > 0);
+  if (invalid.length > 0) {
+    const [first] = invalid;
+    const name = first.provider.label || getProviderType(first.provider.type).label;
+    setSaved(`「${name}」缺少必填项：${first.missing.join('、')}`, true);
+    return;
+  }
 
   saveBtn.disabled = true;
   try {

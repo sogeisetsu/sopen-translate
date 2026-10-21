@@ -74,6 +74,7 @@ translateBtn.addEventListener('click', async () => {
   const tab = await activeTab();
   if (!tab?.id) return;
   translateBtn.disabled = true;
+  restoreBtn.disabled = true;
   setMessage('翻译中…');
   try {
     const result = await askTab(tab.id, { type: 'page.translate' });
@@ -83,6 +84,7 @@ translateBtn.addEventListener('click', async () => {
     setMessage(err instanceof Error ? err.message : String(err), true);
   } finally {
     translateBtn.disabled = false;
+    restoreBtn.disabled = false;
   }
 });
 
@@ -91,7 +93,8 @@ restoreBtn.addEventListener('click', async () => {
   if (!tab?.id) return;
   try {
     const result = await askTab(tab.id, { type: 'page.restore' });
-    setMessage(`已还原 ${result?.restored ?? 0} 段`);
+    if (result?.ok) setMessage(`已还原 ${result.restored ?? 0} 段`);
+    else setMessage(result?.error || '还原失败', true);
   } catch (err) {
     setMessage(err instanceof Error ? err.message : String(err), true);
   }

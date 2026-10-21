@@ -45,15 +45,14 @@ function clip(text = '', max = 240) {
 
 /**
  * @param {string} url
- * @param {{ headers: Record<string, string>, body: unknown, signal?: AbortSignal }} init
+ * @param {{ headers: Record<string, string>, body: unknown }} init
  * @returns {Promise<any>}
  */
-async function postJson(url, { headers, body, signal }) {
+async function postJson(url, { headers, body }) {
   let res;
   try {
-    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
   } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') fail('请求已取消');
     fail(`无法连接 ${url}：${messageOf(err)}`);
   }
 
@@ -112,7 +111,7 @@ const openai = {
     { key: 'model', label: '模型', placeholder: 'gpt-4o-mini', required: true },
     { key: 'apiKey', label: 'API Key', placeholder: 'sk-...', secret: true },
   ],
-  async translate({ texts, config, target, signal }) {
+  async translate({ texts, config, target }) {
     const endpoint = `${trimSlash(config.baseUrl)}/chat/completions`;
 
     /** @type {Record<string, string>} */
@@ -135,11 +134,10 @@ const openai = {
       data = await postJson(endpoint, {
         headers,
         body: { ...base, response_format: { type: 'json_object' } },
-        signal,
       });
     } catch (err) {
       if (!/HTTP 4\d\d/.test(messageOf(err))) throw err;
-      data = await postJson(endpoint, { headers, body: base, signal });
+      data = await postJson(endpoint, { headers, body: base });
     }
 
     const segments = parseSegments(data?.choices?.[0]?.message?.content);
@@ -161,7 +159,7 @@ const deepl = {
     { key: 'baseUrl', label: '接口地址', placeholder: 'https://api-free.deepl.com', required: true },
     { key: 'apiKey', label: 'API Key', placeholder: ':fx 结尾的密钥', secret: true, required: true },
   ],
-  async translate({ texts, config, targetCode, signal }) {
+  async translate({ texts, config, targetCode }) {
     const endpoint = `${trimSlash(config.baseUrl)}/v2/translate`;
     const data = await postJson(endpoint, {
       headers: {
@@ -169,7 +167,6 @@ const deepl = {
         Authorization: `DeepL-Auth-Key ${config.apiKey ?? ''}`,
       },
       body: { text: texts, target_lang: targetCode || 'ZH' },
-      signal,
     });
 
     const list = data?.translations;

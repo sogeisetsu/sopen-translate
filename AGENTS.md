@@ -1,6 +1,6 @@
 # AGENTS.md
 
-MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可加载产物：无构建、无运行时依赖、无测试框架、无 CI。
+MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可加载产物：无构建、无运行时依赖、无 CI，测试只有一个 provider 冒烟脚本。
 
 ## 已拍板的决定（别推翻）
 
@@ -27,13 +27,14 @@ MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可�
 - `npm run check` —— `tsc --noEmit`（`checkJs` 模式）。改完必须零错误，这是唯一能自动拦住契约漂移的手段。
 - `node --check extension/<file>.js` —— 单独确认某个文件语法（Node 22 自带语法检测，ESM 也能过）。
 - `Get-Content extension\manifest.json -Raw | ConvertFrom-Json` —— 验 manifest 结构合法。
-- provider 层可脱离浏览器测：stub `globalThis.fetch` 后 `import` `lib/providers.js` 直接调 `translate()`，覆盖正常返回、代码块包裹的 JSON、接口拒绝 `response_format`、分段数不符。
+- provider 层冒烟测试：`npm run smoke`（`scripts/smoke.mjs`，stub `globalThis.fetch`，不联网）覆盖正常返回、代码块包裹、接口拒绝 `response_format` 时回退、分段数不符、无法解析、HTTP 错误、连接失败。改动 provider 后必须重跑。
 - 真机只能手工：`chrome://extensions` 加载 `extension/` 目录。**没有真实密钥就没法验证端到端**，别声称跑通了。
 
 ## 容易踩的点
 
 - 别给 `#sopen-translate-ui` 加 inline `all: initial`：会重置 `position` / `pointer-events`，反过来覆盖样式表。
-- 整页翻译按 1200 字符 / 20 段分批串行发送；第一批全失败立即中止，避免留下半页译文。改动别破坏这个语义。
+- 整页翻译按 1200 字符 / 20 段分批串行发送；**只有第 0 批失败才中止**（别改回"看 originals 是否为空"，那个判断会被上一轮的残留污染）。
+- 每轮翻译开始前必须先还原上一轮的改动（`originals` 复位）：否则第二轮会把译文再翻一遍，且「还原」回不到原文。
 - `host_permissions: <all_urls>` 和 content script 的 `<all_urls>` 是必要的——接口地址由用户自己填，别收窄成固定域名。
 - 只在顶层 frame 生效（`all_frames: false`），是有意为之。
 - 类型声明集中在仓库根的 `types.d.ts`，JSDoc 里用 `import('../../types')` 引用；它不会被扩展加载，别挪进 `extension/`。
