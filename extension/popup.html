@@ -11,10 +11,14 @@
       <span id="provider" class="muted">读取中…</span>
     </header>
 
-    <div class="actions">
-      <button id="translate" class="btn primary" type="button">翻译此页</button>
-      <button id="restore" class="btn" type="button">还原</button>
+    <button id="main" class="round" type="button" aria-label="翻译此页">翻译</button>
+
+    <div class="mode" role="group" aria-label="展示模式">
+      <button type="button" data-mode="translation" aria-pressed="true">纯译文</button>
+      <button type="button" data-mode="bilingual" aria-pressed="false">双语</button>
     </div>
+
+    <select id="target-lang" class="input" aria-label="目标语言"></select>
 
     <p id="message" class="muted" role="status"></p>
 

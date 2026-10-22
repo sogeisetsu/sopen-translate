@@ -34,19 +34,19 @@
 
 ## Steps
 
-- [ ] **A0 基线**：`npm run check` / `npm run smoke` / `npm run smoke:dom` 先全绿，记下当前 9 + 6 个用例的通过状态
-- [ ] A1 类型与存储：`types.d.ts` 扩展；`lib/settings.js` 加 `schemaVersion` / `enforcement` / `sessionId` / 迁移 / `patchProvider`
-- [ ] A2 基础设施：新增 `lib/http.js`、`lib/segments.js`、`lib/prompt.js`、`lib/protocols.js`
-- [ ] A3 预设与模型：新增 `lib/provider-presets.js`、`lib/models.js`；OpenCode Go 独立 `modelsUrl`
-- [ ] A4 `lib/providers.js` 重构：协议注册 + `translateBatch()`；保留 `getProviderType()` 兼容入口
-- [ ] A5 `background.js`：`models.list` 消息；`translate` 走 pipeline；`testProvider` 跳过术语层
-- [ ] A6 设置页：12 预设 + 自定义、模型下拉 + 刷新、术语三档、语言下拉、关于
-- [ ] A7 验收 A：`npm run check` + `npm run smoke` 通过（新增用例见 A7）
-- [ ] B1 存储：`displayMode` 读取与回显
-- [ ] B2 `content.js`：块内追加双语译文 + 叶子容器回退 + 按句切分 + 统一还原 + 熔断 + 进度
-- [ ] B3 `content.css`：`.sopen-translated-block`（唯一作用域例外）
-- [ ] B4 popup：圆形主按钮 + 模式切换 + 语言下拉 + 轮询进度
-- [ ] B5 验收 B：`npm run smoke:dom` 通过（新增用例见 B5）
+- [x] **A0 基线**：`npm run check` / `npm run smoke` / `npm run smoke:dom` 先全绿，记下当前 9 + 6 个用例的通过状态
+- [x] A1 类型与存储：`types.d.ts` 扩展；`lib/settings.js` 加 `schemaVersion` / `enforcement` / `sessionId` / 迁移 / `patchProvider`
+- [x] A2 基础设施：新增 `lib/http.js`、`lib/segments.js`、`lib/prompt.js`、`lib/protocols.js`
+- [x] A3 预设与模型：新增 `lib/provider-presets.js`、`lib/models.js`；OpenCode Go 独立 `modelsUrl`
+- [x] A4 `lib/providers.js` 重构：协议注册 + `translateBatch()`；保留 `getProviderType()` 兼容入口
+- [x] A5 `background.js`：`models.list` 消息；`translate` 走 pipeline；`testProvider` 跳过术语层
+- [x] A6 设置页：12 预设 + 自定义、模型下拉 + 刷新、术语三档、语言下拉、关于
+- [x] A7 验收 A：`npm run check` + `npm run smoke` 通过（新增用例见 A7）
+- [x] B1 存储：`displayMode` 读取与回显
+- [x] B2 `content.js`：块内追加双语译文 + 叶子容器回退 + 按句切分 + 统一还原 + 熔断 + 进度
+- [x] B3 `content.css`：`.sopen-translated-block`（唯一作用域例外）
+- [x] B4 popup：圆形主按钮 + 模式切换 + 语言下拉 + 轮询进度
+- [x] B5 验收 B：`npm run smoke:dom` 通过（新增用例见 B5）
 - [ ] C1 词库：`glossary-allowlist.txt`、`glossary-snapshot.json`、`build-glossary.mjs` → `lib/glossary-data.json`（离线、入库）
 - [ ] C2 术语匹配：`lib/glossary.js`（纯函数）
 - [ ] C3 prompt 注入 + 译后校验 + 修复重试（在 pipeline 内）

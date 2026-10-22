@@ -30,46 +30,83 @@ body {
   font-size: 12px;
 }
 
-.actions {
+/* 圆形主按钮：翻译 / 还原 / 进度都在这一个按钮上 */
+.round {
+  display: block;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 12px;
+  padding: 0;
+  border: 1px solid #1f883d;
+  border-radius: 50%;
+  background: #1f883d;
+  color: #ffffff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.round:hover:not(:disabled) {
+  background: #1a7f37;
+}
+
+.round:disabled {
+  border-color: #d0d7de;
+  background: #f6f8fa;
+  color: #57606a;
+  cursor: default;
+}
+
+.mode {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
   margin-bottom: 8px;
 }
 
-.btn {
-  padding: 7px 12px;
+.mode button {
+  padding: 6px 8px;
   border: 1px solid #d0d7de;
   border-radius: 6px;
   background: #f6f8fa;
   color: #1f2328;
   font: inherit;
+  font-size: 12px;
   cursor: pointer;
 }
 
-.btn:hover:not(:disabled) {
-  background: #eaeef2;
-}
-
-.btn.primary {
-  border-color: #1f883d;
-  background: #1f883d;
-  color: #ffffff;
+.mode button[aria-pressed='true'] {
+  border-color: #0969da;
+  background: #ddf4ff;
+  color: #0969da;
   font-weight: 600;
 }
 
-.btn.primary:hover:not(:disabled) {
-  background: #1a7f37;
-}
-
-.btn:disabled {
+.mode button:disabled {
   opacity: 0.55;
   cursor: default;
 }
 
+.input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1f2328;
+  font: inherit;
+  font-size: 12px;
+}
+
+.input:focus-visible {
+  outline: 2px solid #0969da;
+  outline-offset: -1px;
+}
+
 #message {
   min-height: 18px;
-  margin: 4px 0 8px;
+  margin: 8px 0;
 }
 
 #message.is-error {

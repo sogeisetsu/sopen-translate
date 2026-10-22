@@ -1,4 +1,4 @@
-/* 全部样式限制在 #sopen-translate-ui 里，避免污染宿主页面 */
+/* 浮层样式限制在 #sopen-translate-ui 里，避免污染宿主页面 */
 
 #sopen-translate-ui {
   position: fixed;
@@ -9,6 +9,20 @@
     "Microsoft YaHei", sans-serif;
   font-size: 14px;
   line-height: 1.5;
+}
+
+/*
+ * 唯一一条作用域例外：译文块必须挂在宿主页面的块元素里，
+ * 不能塞进 #sopen-translate-ui。类名带 sopen- 前缀，避免和宿主样式撞车。
+ */
+.sopen-translated-block {
+  display: block;
+  margin: 0.25em 0 0.5em;
+  color: inherit;
+  font-size: inherit;
+  line-height: 1.6;
+  opacity: 0.88;
+  white-space: pre-line;
 }
 
 .sopen-toast {
