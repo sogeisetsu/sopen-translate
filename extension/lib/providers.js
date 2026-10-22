@@ -47,19 +47,60 @@ function uniqueTerms(matches) {
 }
 
 /**
+ * 哪些错误值得“拆小重试”：输出被截断或 JSON 坏掉。
+ * HTTP 401/429 之类不该拆，拆了只会放大请求。
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isSplittableError(err) {
+  const message = err instanceof Error ? err.message : String(err);
+  return /分段数不符|无法解析模型返回|模型返回为空|响应不是合法 JSON/.test(message);
+}
+
+/**
  * @param {TranslateArgs} args
  * @returns {Promise<TranslateBatchResult>}
  */
-export async function translateBatch({
-  texts,
-  config,
-  target,
-  targetCode,
-  glossary = [],
-  enforcement = 'repair',
-  extraHeaders,
-  retry,
-}) {
+async function splitBatch(args) {
+  const mid = Math.ceil(args.texts.length / 2);
+  const left = await runBatch({ ...args, texts: args.texts.slice(0, mid) }, true);
+  const right = await runBatch({ ...args, texts: args.texts.slice(mid) }, true);
+  return {
+    translations: [...left.translations, ...right.translations],
+    protected: left.protected + right.protected,
+    warnings: [
+      ...left.warnings,
+      ...right.warnings.map((warning) => ({ ...warning, index: warning.index + mid })),
+    ],
+  };
+}
+
+/**
+ * @param {TranslateArgs} args
+ * @returns {Promise<TranslateBatchResult>}
+ */
+export async function translateBatch(args) {
+  return runBatch(args, true);
+}
+
+/**
+ * 输出被截断（分段数不符 / JSON 解析失败）时自动二分重试。
+ * 不同模型的输出上限不同，客户端不写死 4096。
+ * @param {TranslateArgs} args
+ * @param {boolean} allowSplit
+ * @returns {Promise<TranslateBatchResult>}
+ */
+async function runBatch(args, allowSplit) {
+  const {
+    texts,
+    config,
+    target,
+    targetCode,
+    glossary = [],
+    enforcement = 'repair',
+    extraHeaders,
+    retry,
+  } = args;
   const protocol = getProtocol(config.protocol);
 
   // DeepL 没有 prompt 通道：完全跳过术语层，不注入、不校验、不回退。
@@ -82,16 +123,27 @@ export async function translateBatch({
   const termsForPrompt = promptTerms(matches.flat(), 40);
   const allowed = new Set(termsForPrompt.map((term) => term.toLowerCase()));
 
-  const translations = await protocol.translate({
-    texts,
-    config,
-    target,
-    targetCode,
-    terms: termsForPrompt,
-    extraHeaders,
-    retry,
-  });
-  assertLength(translations, texts.length);
+  /** @type {string[]} */
+  let translations;
+  try {
+    translations = await protocol.translate({
+      texts,
+      config,
+      target,
+      targetCode,
+      terms: termsForPrompt,
+      extraHeaders,
+      retry,
+    });
+  } catch (err) {
+    if (allowSplit && texts.length > 1 && isSplittableError(err)) return splitBatch(args);
+    throw err;
+  }
+
+  if (translations.length !== texts.length) {
+    if (allowSplit && texts.length > 1) return splitBatch(args);
+    assertLength(translations, texts.length);
+  }
 
   /** @type {{ index: number, missing: string[] }[]} */
   const failures = [];

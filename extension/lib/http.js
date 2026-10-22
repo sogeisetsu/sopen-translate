@@ -106,7 +106,7 @@ export async function postJson(url, options = {}) {
   const {
     headers = {},
     body,
-    timeoutMs = 30000,
+    timeoutMs = 120000,
     retryDelays = [1000, 4000, 10000],
   } = options;
 

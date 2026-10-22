@@ -251,6 +251,11 @@ globalThis.chrome = {
       },
     },
     async sendMessage(message) {
+      if (message.type === 'status') {
+        // 用 DeepL 策略（50 段/批、4 路并发）让批次数可预测；
+        // 这里只测 content 的分批/并发，不关心真实协议。
+        return { ok: true, active: { presetId: 'deepl', protocol: 'deepl' } };
+      }
       calls += 1;
       if (gate) await gate;
       seen.push(...message.texts);
@@ -545,10 +550,36 @@ await test('翻译进行中拒绝还原', async () => {
   assert.equal(result.ok, true, result.error);
 });
 
+await test('并发：多批同时在飞，结果仍按原文顺序写回', async () => {
+  await resetPageStub();
+  const paragraphs = Array.from({ length: 120 }, (_, i) => el('p', `word${String(i).padStart(3, '0')}`));
+  resetBody(...paragraphs);
+
+  let open;
+  gate = new Promise((resolve) => {
+    open = resolve;
+  });
+
+  const translating = send({ type: 'page.translate' });
+  await tick();
+  assert.equal(calls, 3, '120 段 / 每批 50 段应当同时起飞 3 批');
+
+  gate = null;
+  open();
+  const result = await translating;
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.translated, 120);
+  assert.equal(result.failed, 0);
+  assert.equal(paragraphs[0].textContent, '中:word000');
+  assert.equal(paragraphs[119].textContent, '中:word119');
+});
+
 await test('熔断：连续 3 批失败后停止，保留已翻部分', async () => {
   await resetPageStub();
-  const paragraphs = Array.from({ length: 80 }, (_, i) =>
-    el('p', `word${String(i).padStart(3, '0')}`),
+  // 每段约 48 字符、每批 50 段 → 240 段 = 5 批；并发 4 会先起飞前 4 批
+  const filler = 'x'.repeat(39);
+  const paragraphs = Array.from({ length: 240 }, (_, i) =>
+    el('p', `word${String(i).padStart(3, '0')} ${filler}`),
   );
   resetBody(...paragraphs);
 
@@ -567,11 +598,12 @@ await test('熔断：连续 3 批失败后停止，保留已翻部分', async ()
   const result = await send({ type: 'page.translate' });
   assert.equal(result.ok, true, result.error);
   assert.equal(result.stopped, true);
-  assert.equal(result.translated, 20, '第一批的 20 段应当保留');
-  assert.equal(result.failed, 60);
-  assert.equal(calls, 4, '第 4 批触发熔断后不应再请求');
-  assert.equal(paragraphs[0].textContent, '中:word000');
-  assert.equal(paragraphs[20].textContent, 'word020', '后续批次保持原文');
+  assert.ok(result.translated >= 50, `第一批的 50 段应当保留，实际 ${result.translated}`);
+  assert.ok(result.failed >= 150, `至少 3 批失败，实际 ${result.failed}`);
+  // 并发下已经在飞的批次无法取消，允许比阈值多带最多 CONCURRENCY-1 批
+  assert.ok(calls <= 5, `熔断后不应继续调度，实际 ${calls} 次`);
+  assert.equal(paragraphs[0].textContent.startsWith('中:'), true);
+  assert.equal(paragraphs[50].textContent.startsWith('word050'), true, '失败批次保持原文');
 });
 
 await test('进度：翻译中 total > 0，结束后 done === total', async () => {

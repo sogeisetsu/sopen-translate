@@ -46,7 +46,8 @@
 - [x] B2 `content.js`：块内追加双语译文 + 叶子容器回退 + 按句切分 + 统一还原 + 熔断 + 进度
 - [x] B3 `content.css`：`.sopen-translated-block`（唯一作用域例外）
 - [x] B4 popup：圆形主按钮 + 模式切换 + 语言下拉 + 轮询进度
-- [x] B5 验收 B：`npm run smoke:dom` 通过（新增用例见 B5）
+- [ ] B5 验收 B：`npm run smoke:dom` 通过（新增用例见 B5）
+- [x] **B6 批处理优化（2026-10-23 追加，用户要求）**：按字符预算而不是 20 段硬上限分批；协议感知段数上限；内容脚本有限并发；输出被截断时自动二分重试
 - [x] C1 词库：`glossary-allowlist.txt`、`glossary-snapshot.json`、`build-glossary.mjs` → `lib/glossary-data.json`（离线、入库）
 - [x] C2 术语匹配：`lib/glossary.js`（纯函数）
 - [x] C3 prompt 注入 + 译后校验 + 修复重试（在 pipeline 内）
@@ -438,7 +439,7 @@ export function fail(message, status) { throw new ProviderError(message, status)
 export function messageOf(err) { ... }
 export function clip(text, max = 240) { ... }
 export function joinUrl(base, path) { ... }   // 去掉多余斜杠
-export async function postJson(url, { headers, body, timeoutMs = 30000, retryDelays = [1000, 4000, 10000] } = {}) { ... }
+export async function postJson(url, { headers, body, timeoutMs = 120000, retryDelays = [1000, 4000, 10000] } = {}) { ... }
 export async function getJson(url, { headers, timeoutMs = 8000 } = {}) { ... }
 ```
 
@@ -1132,6 +1133,57 @@ function resetPage() {
 npm run check
 npm run smoke:dom
 ```
+
+---
+
+## B6 批处理优化（2026-10-23 追加）
+
+### 问题
+
+Wikipedia 正文 77,649 字符、4,128 个文本节点。旧规则「1200 字符 / 20 段」在短节点页面上先撞段数上限：
+每批只有约 376 字符，整页 207 个串行请求；OpenCode Go 每个 429 又要退避 1+4+10 秒，最终 25 分钟只跑到一半。
+
+### 实测依据
+
+- 180 段、批大小 20/50/100/200：总耗时 36.6s / 33.2s / 34.0s / 28.3s——**端点瓶颈是输出吞吐，不是请求数**。
+- 240 段、50 段/批、并发 1/2/4/8：40.5s / 20.1s / 17.5s / 11.6s——**并发接近线性**。
+- 并发 1 时出现过「期望 50、实际 42」的输出截断，说明不同模型的输出上限不同，不能写死。
+
+### 设计
+
+- **按 provider 策略分批**：
+  - LLM：4000 字符 / 200 段，并发 4 路；
+  - DeepL：3000 字符 / 50 段（单请求上限），并发 4 路；
+  - 商汤：4000 字符 / 200 段，并发 1 路（实测并发即 429）。
+- 策略由内容脚本通过 `status.active.protocol / presetId` 读取，不需要新消息。
+- `postJson` 的翻译超时从 30 秒放宽到 **120 秒**：200 段批次的实测耗时约 28 秒，30 秒会把正常请求判成超时。
+- `translateBatch()` 遇到「分段数不符 / 无法解析 / 模型返回为空」时**自动二分重试**，直到单段；HTTP 401/429 等不拆。
+- 不变量不变：原序等长、第 0 批失败中止、连续 3 批失败熔断、进度累加、还原语义。
+- 并发下熔断后已起飞的批次无法取消，允许最多多带 `并发数-1` 批，测试按此断言。
+
+### 验收
+
+`npm run check` / `npm run smoke`（新增 429 不拆批、截断二分、并发用例）/ `npm run smoke:dom`（新增并发用例）全绿；
+Wikipedia 用 OpenCode Go 实跑，记录耗时与是否触发熔断。
+
+### B6 验收记录（2026-10-23）
+
+真机 Edge 157 + `deepseek-v4.1-flash`，同一台机器、同一批页面，最终策略为 LLM 4000 字符 / 200 段 / 4 路并发：
+
+| 页面 | 优化前 | 优化后 | 结果 |
+| --- | --- | --- | --- |
+| opencode.ai/go 纯译文 | 121s | **45s** | 0 失败 |
+| opencode.ai/go 双语 | 87s | **90s** | 0 失败 |
+| GitHub issue 纯译文 | 75s | **69s** | 0 失败 |
+| GitHub issue 双语 | 63s | **30s** | 0 失败 |
+| linux.org 纯译文 | 21s | **18s** | 0 失败 |
+| linux.org 双语 | 21s | **9s** | 0 失败 |
+| Wikipedia 纯译文 | 25 分钟只到 1891/4128，随后脚本超时 | **316s 完整跑完**（translated 2753） | 0 失败、未熔断 |
+| Wikipedia 双语 | 限流中断，未跑完 | **181s 完整跑完**（translated 676） | 0 失败、未熔断 |
+
+- 请求数：Wikipedia 纯译文由 207 批降到约 21 批；双语由 35 批降到约 5 批。
+- 所有页面还原后文本长度与翻译前一致（GitHub 双语差 95 字符，来自 SPA 重渲染，在容差内）。
+- 30 秒 HTTP 超时会误杀 200 段批次（实测约 28s），已放宽到 120s；这是本轮定位到的第二个真问题。
 
 ---
 

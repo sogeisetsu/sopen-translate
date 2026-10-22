@@ -143,11 +143,11 @@ await test('openai：401 时不触发 response_format 回退', async () => {
   assert.equal(calls, 1, '401 只应发一次');
 });
 
-await test('openai：分段数不符必须抛错', async () => {
-  stubOpenAI(() => JSON.stringify({ segments: ['only-one'] }));
+await test('openai：单段仍不符必须抛错（二分到底也不对）', async () => {
+  stubOpenAI(() => JSON.stringify({ segments: [] }));
   await assert.rejects(
     getProviderType('openai').translate({
-      texts: ['a', 'b'],
+      texts: ['a'],
       config: openaiConfig,
       target: '中文',
       targetCode: 'ZH',
@@ -408,6 +408,51 @@ await test('429：连续失败抛 HTTP 429，且不触发 response_format 回退
     /HTTP 429/,
   );
   assert.equal(calls, 4, '1 次初始 + 3 次重试，不应再叠加 response_format 回退');
+});
+
+await test('429：不会触发二分重试（只有截断才拆批）', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response('rate limited', { status: 429 });
+  };
+  await assert.rejects(
+    translateBatch({
+      texts: ['a', 'b'],
+      config: chatConfig,
+      target: '中文',
+      targetCode: 'ZH',
+      retry: { delays: [0, 0, 0] },
+    }),
+    /HTTP 429/,
+  );
+  assert.equal(calls, 4, '2 段 429 也只应有 1+3 次请求，不能拆成两批放大');
+});
+
+await test('截断自适应：分段数不符时二分重试并保持顺序', async () => {
+  let calls = 0;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls += 1;
+    const segments = JSON.parse(body.messages[1].content).segments;
+    // 第一次故意少返回一段，模拟输出被截断
+    const out =
+      calls === 1 ? segments.slice(0, Math.max(0, segments.length - 1)) : segments.map((s) => `译:${s}`);
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: JSON.stringify({ segments: out }) } }] }),
+      { status: 200 },
+    );
+  };
+
+  const result = await translateBatch({
+    texts: ['first text', 'second text'],
+    config: chatConfig,
+    target: '中文',
+    targetCode: 'ZH',
+  });
+
+  assert.deepEqual(result.translations, ['译:first text', '译:second text']);
+  assert.equal(calls, 3, '1 次整批 + 2 次二分');
 });
 
 /* ------------------------------ 术语保护 ------------------------------ */

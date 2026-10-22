@@ -38,8 +38,10 @@
     'SVG', 'CANVAS', 'IFRAME', 'OBJECT',
   ]);
 
-  const BATCH_CHARS = 1200;
-  const BATCH_ITEMS = 20;
+  // 按字符预算分批：20 段/批会让 Wikipedia 这种“几千个短节点”的页面发出上百个请求。
+  // 默认值只给兜底；实际策略由 readPolicy() 按协议/预设决定。
+  const BATCH_CHARS = 3000;
+  const BATCH_ITEMS = 50;
   const MIN_TEXT_LEN = 2;
   const MAX_SEGMENT_CHARS = 1200;
   const MAX_CONSECUTIVE_FAILURES = 3;
@@ -82,6 +84,74 @@
       protected: Number(res.protected) || 0,
       warnings: Array.isArray(res.warnings) ? res.warnings : [],
     };
+  }
+
+  /* ------------------------------- 并发调度 ------------------------------- */
+
+  /**
+   * 端点限流特性不同，批大小与并发不能一刀切：
+   * - DeepL 单请求最多 50 条 text，但吞吐高，可以 4 路；
+   * - OpenCode Go 限的是持续速率，少而大的批次更稳（实测 50 段 × 4 路会熔断）；
+   * - 商汤 RPM 很低，1 路。
+   * @returns {Promise<{ chars: number, items: number, concurrency: number }>}
+   */
+  async function readPolicy() {
+    try {
+      const status = await chrome.runtime.sendMessage({ type: 'status' });
+      const active = status?.active;
+      if (active?.protocol === 'deepl') return { chars: 3000, items: 50, concurrency: 4 };
+      if (active?.presetId === 'sensenova') return { chars: 4000, items: 200, concurrency: 1 };
+      return { chars: 4000, items: 200, concurrency: 4 };
+    } catch {
+      return { chars: BATCH_CHARS, items: BATCH_ITEMS, concurrency: 4 };
+    }
+  }
+
+  /**
+   * 有限并发执行批次；顺序由调用方按 index 写回，不依赖完成顺序。
+   * - 第 0 批失败立即中止（多半是配置问题）
+   * - 连续 3 批失败熔断，已完成的批次保留
+   * @template T
+   * @param {T[]} jobs
+   * @param {(job: T, index: number) => Promise<void>} worker
+   * @param {number} concurrency
+   * @returns {Promise<{ stopped: boolean }>}
+   */
+  async function runPool(jobs, worker, concurrency) {
+    let next = 0;
+    let consecutiveFailures = 0;
+    let stopped = false;
+    /** @type {unknown} */
+    let firstError = null;
+
+    async function lane() {
+      for (;;) {
+        if (stopped) return;
+        const index = next;
+        next += 1;
+        if (index >= jobs.length) return;
+        try {
+          await worker(jobs[index], index);
+          consecutiveFailures = 0;
+        } catch (err) {
+          consecutiveFailures += 1;
+          if (index === 0) {
+            stopped = true;
+            firstError = err;
+            return;
+          }
+          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            stopped = true;
+            return;
+          }
+        }
+      }
+    }
+
+    const lanes = Math.max(1, Math.min(concurrency, jobs.length));
+    await Promise.all(Array.from({ length: lanes }, lane));
+    if (firstError) throw firstError;
+    return { stopped };
   }
 
   /* --------------------------------- 状态条 -------------------------------- */
@@ -151,9 +221,12 @@
   /**
    * 按字符预算把节点切成批，尽量不打断段落语境
    * @param {Text[]} nodes
+   * @param {{ chars?: number, items?: number }} [policy]
    * @returns {Text[][]}
    */
-  function batchNodes(nodes) {
+  function batchNodes(nodes, policy = {}) {
+    const maxChars = policy.chars ?? BATCH_CHARS;
+    const maxItems = policy.items ?? BATCH_ITEMS;
     /** @type {Text[][]} */
     const batches = [];
     /** @type {Text[]} */
@@ -162,7 +235,7 @@
 
     for (const node of nodes) {
       const len = (node.nodeValue || '').trim().length;
-      if (current.length > 0 && (chars + len > BATCH_CHARS || current.length >= BATCH_ITEMS)) {
+      if (current.length > 0 && (chars + len > maxChars || current.length >= maxItems)) {
         batches.push(current);
         current = [];
         chars = 0;
@@ -370,9 +443,12 @@
 
   /**
    * @param {{ text: string }[]} segments
+   * @param {{ chars?: number, items?: number }} [policy]
    * @returns {{ text: string }[][]}
    */
-  function batchSegments(segments) {
+  function batchSegments(segments, policy = {}) {
+    const maxChars = policy.chars ?? BATCH_CHARS;
+    const maxItems = policy.items ?? BATCH_ITEMS;
     /** @type {{ text: string }[][]} */
     const batches = [];
     /** @type {{ text: string }[]} */
@@ -381,7 +457,7 @@
 
     for (const segment of segments) {
       const len = segment.text.length;
-      if (current.length > 0 && (chars + len > BATCH_CHARS || current.length >= BATCH_ITEMS)) {
+      if (current.length > 0 && (chars + len > maxChars || current.length >= maxItems)) {
         batches.push(current);
         current = [];
         chars = 0;
@@ -520,42 +596,34 @@
     }
 
     state.progress = { done: 0, total: nodes.length };
-    const batches = batchNodes(nodes);
+    const policy = await readPolicy();
+    const batches = batchNodes(nodes, policy);
     let translated = 0;
     let failed = 0;
     let protectedCount = 0;
     let warnings = 0;
-    let consecutive = 0;
-    let stopped = false;
 
     try {
-      for (let index = 0; index < batches.length; index += 1) {
-        const batch = batches[index];
-        showToast(progressText());
-
-        /** @type {{ translations: string[], protected: number, warnings: { index: number, missing: string[] }[] }} */
-        let result;
-        try {
-          result = await requestTranslate(batch.map((node) => (node.nodeValue || '').trim()));
-        } catch (err) {
-          failed += batch.length;
-          state.progress.done += batch.length;
-          consecutive += 1;
-          // 只有第一批失败才中止：多半是配置问题，别把整页都跑一遍无效请求
-          if (index === 0) throw err;
-          if (consecutive >= MAX_CONSECUTIVE_FAILURES) {
-            stopped = true;
-            break;
+      const { stopped } = await runPool(
+        batches,
+        async (batch) => {
+          showToast(progressText());
+          try {
+            const result = await requestTranslate(
+              batch.map((node) => (node.nodeValue || '').trim()),
+            );
+            protectedCount += result.protected;
+            warnings += result.warnings.length;
+            translated += applyTextTranslations(batch, result.translations);
+            state.progress.done += batch.length;
+          } catch (err) {
+            failed += batch.length;
+            state.progress.done += batch.length;
+            throw err;
           }
-          continue;
-        }
-
-        consecutive = 0;
-        protectedCount += result.protected;
-        warnings += result.warnings.length;
-        translated += applyTextTranslations(batch, result.translations);
-        state.progress.done += batch.length;
-      }
+        },
+        policy.concurrency,
+      );
 
       showToast(
         summaryText(`已翻译 ${translated} 段`, {
@@ -584,45 +652,42 @@
     }
 
     state.progress = { done: 0, total: segments.length };
-    const batches = batchSegments(segments);
+    const policy = await readPolicy();
+    const batches = batchSegments(segments, policy);
+    /** @type {{ items: { text: string }[], offset: number }[]} */
+    const jobs = [];
+    let offset = 0;
+    for (const items of batches) {
+      jobs.push({ items, offset });
+      offset += items.length;
+    }
     /** @type {string[]} */
     const translations = new Array(segments.length).fill('');
     let failed = 0;
     let protectedCount = 0;
     let warnings = 0;
-    let consecutive = 0;
-    let stopped = false;
-    let offset = 0;
 
     try {
-      for (let index = 0; index < batches.length; index += 1) {
-        const batch = batches[index];
-        showToast(progressText());
-
-        try {
-          const result = await requestTranslate(batch.map((segment) => segment.text));
-          result.translations.forEach((text, position) => {
-            translations[offset + position] = text;
-          });
-          protectedCount += result.protected;
-          warnings += result.warnings.length;
-        } catch (err) {
-          failed += batch.length;
-          state.progress.done += batch.length;
-          offset += batch.length;
-          consecutive += 1;
-          if (index === 0) throw err;
-          if (consecutive >= MAX_CONSECUTIVE_FAILURES) {
-            stopped = true;
-            break;
+      const { stopped } = await runPool(
+        jobs,
+        async (job) => {
+          showToast(progressText());
+          try {
+            const result = await requestTranslate(job.items.map((segment) => segment.text));
+            result.translations.forEach((text, position) => {
+              translations[job.offset + position] = text;
+            });
+            protectedCount += result.protected;
+            warnings += result.warnings.length;
+            state.progress.done += job.items.length;
+          } catch (err) {
+            failed += job.items.length;
+            state.progress.done += job.items.length;
+            throw err;
           }
-          continue;
-        }
-
-        consecutive = 0;
-        state.progress.done += batch.length;
-        offset += batch.length;
-      }
+        },
+        policy.concurrency,
+      );
 
       const translated = applyBlockTranslations(blocks, segments, translations);
       showToast(
