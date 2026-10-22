@@ -5,7 +5,9 @@
   "scripts": {
     "check": "tsc -p .",
     "smoke": "node scripts/smoke.mjs",
-    "smoke:dom": "node scripts/dom-smoke.mjs"
+    "smoke:dom": "node scripts/dom-smoke.mjs",
+    "build:glossary": "node scripts/build-glossary.mjs",
+    "build:glossary:snapshot": "node scripts/build-glossary-snapshot.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.3.6",

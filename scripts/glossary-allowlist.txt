@@ -1,0 +1,446 @@
+# 内置术语词表（人工维护，一行一个词，# 开头为注释）
+#
+# 规则：只放“译成中文会明显错误”的品牌 / 产品 / 协议 / 型号名。
+# 不放普通英文单词，也不放会和正文撞车的词（大小写不敏感匹配）：
+#   X / Circle / Square / Meta / Go / Rust / Swift / C / R / Search / Fast
+#   / Large / Auto / Echo / Fusion / Extract / Summarize / bat / comma
+#   / smart / sharp / remark / mailbox / slack / notion / linear / sketch
+#   / unity / atom / screen / snap / scoop / apt / yum / curl / teams / zoom
+# 构建脚本会用 scripts/glossary-blocklist.txt 再兜一层。
+
+# --- AI 厂商 / 模型 ---
+OpenAI
+Anthropic
+Claude
+Claude Code
+ChatGPT
+GPT-4
+GPT-4o
+GPT-5
+GPT-5.6 Luna
+GPT-6 Luna
+DeepSeek
+DeepSeek V4
+DeepSeek V4.1
+DeepSeek V4.1 Flash
+DeepSeek V4 Pro
+Qwen
+Qwen3
+Qwen3.8 Flash
+Llama
+Llama 3
+Mistral
+Mistral AI
+Gemini
+GitHub Copilot
+Hugging Face
+Transformers
+PyTorch
+TensorFlow
+JAX
+Keras
+ONNX
+CUDA
+TensorRT
+vLLM
+Ollama
+LangChain
+LlamaIndex
+RAG
+LoRA
+QLoRA
+RLHF
+Mixture of Experts
+Stable Diffusion
+Midjourney
+Whisper
+YOLO
+OpenCV
+scikit-learn
+NumPy
+Pandas
+Jupyter
+Anaconda
+Kaggle
+Grok
+Together AI
+OpenRouter
+SenseNova
+MiniMax
+MiniMax M3
+MiniMax M3.1
+MiniMax M3.1 Flash
+Kimi
+Kimi K2.6
+Kimi K3
+GLM-4
+GLM-5
+GLM-5.3
+GLM-5.3 Flash
+Codex
+Windsurf
+
+# --- 云 / 基础设施 ---
+Kubernetes
+Docker
+Docker Compose
+Podman
+containerd
+Helm
+Istio
+Envoy
+Prometheus
+Grafana
+OpenTelemetry
+Jaeger
+Terraform
+Ansible
+Vagrant
+HashiCorp Vault
+etcd
+CoreDNS
+Cilium
+Calico
+Knative
+Argo CD
+Argo Workflows
+Jenkins
+GitLab CI
+GitHub Actions
+CircleCI
+Travis CI
+TeamCity
+Sonatype Nexus
+Artifactory
+Nginx
+Apache HTTP Server
+HAProxy
+Traefik
+Cloudflare
+Cloudflare Workers
+AWS
+Amazon Web Services
+AWS Lambda
+Azure
+Microsoft Azure
+Google Cloud
+Google Cloud Platform
+Alibaba Cloud
+Tencent Cloud
+Huawei Cloud
+S3
+EC2
+CloudFront
+Route 53
+IAM
+VPC
+EKS
+ECS
+GKE
+AKS
+Cloud Run
+Cloud Functions
+Firebase
+Supabase
+Vercel
+Netlify
+Heroku
+DigitalOcean
+Linode
+Fly.io
+Deno Deploy
+
+# --- 数据库 / 数据 ---
+PostgreSQL
+MySQL
+MariaDB
+SQLite
+MongoDB
+Redis
+Memcached
+Cassandra
+ScyllaDB
+ClickHouse
+Elasticsearch
+OpenSearch
+Solr
+Neo4j
+InfluxDB
+TimescaleDB
+CockroachDB
+DynamoDB
+BigQuery
+Snowflake
+Databricks
+Apache Kafka
+RabbitMQ
+NATS
+Apache Pulsar
+ZooKeeper
+MinIO
+Ceph
+HDFS
+Apache Hive
+Apache Spark
+Apache Flink
+Apache Airflow
+dbt
+Trino
+Presto
+DuckDB
+Milvus
+Pinecone
+Weaviate
+Qdrant
+pgvector
+Prisma
+TypeORM
+Sequelize
+SQLAlchemy
+Hibernate
+
+# --- 语言 / 框架 / 工具链 ---
+JavaScript
+TypeScript
+Python
+Java
+Kotlin
+Scala
+C++
+C#
+F#
+Objective-C
+PHP
+Ruby
+Perl
+Lua
+Dart
+Elixir
+Erlang
+Haskell
+Clojure
+OCaml
+Zig
+Julia
+MATLAB
+Groovy
+CoffeeScript
+WebAssembly
+AssemblyScript
+Bash
+PowerShell
+SQL
+HTML
+CSS
+SCSS
+Tailwind CSS
+Bootstrap
+React
+React Native
+Next.js
+Nuxt
+Vue.js
+Angular
+Svelte
+SolidJS
+Astro
+Remix
+Gatsby
+Ember.js
+jQuery
+Redux
+Zustand
+MobX
+React Query
+TanStack Query
+Vite
+Webpack
+Rollup
+esbuild
+SWC
+Turbopack
+ESLint
+Prettier
+Jest
+Vitest
+Mocha
+Playwright
+Cypress
+Puppeteer
+Storybook
+Node.js
+Deno
+Express.js
+Koa
+Fastify
+NestJS
+Django
+FastAPI
+Laravel
+Symfony
+Spring Boot
+Spring Framework
+Quarkus
+Micronaut
+.NET
+ASP.NET Core
+Entity Framework
+Actix
+Axum
+Tauri
+Electron
+Flutter
+SwiftUI
+Jetpack Compose
+Xamarin
+MAUI
+Qt
+GTK
+Tkinter
+PyQt
+OpenGL
+Vulkan
+WebGL
+WebGPU
+DirectX
+
+# --- 协议 / 标准 / Web ---
+WebRTC
+WebSocket
+WebSockets
+HTTP/2
+HTTP/3
+gRPC
+GraphQL
+OpenAPI
+Swagger
+JSON
+YAML
+TOML
+XML
+Markdown
+LaTeX
+Protobuf
+Protocol Buffers
+Avro
+Parquet
+OAuth
+OAuth 2.0
+OpenID Connect
+JWT
+SAML
+LDAP
+SSO
+MFA
+TLS
+SSL
+SSH
+HTTPS
+DNS
+CDN
+VPN
+TCP
+UDP
+IPv4
+IPv6
+QUIC
+mTLS
+CORS
+CSRF
+XSS
+RBAC
+ABAC
+Zero Trust
+
+# --- 平台 / 社区 / 公司 ---
+Git
+GitHub
+GitLab
+Bitbucket
+Gerrit
+SVN
+Mercurial
+Jira
+Trello
+Asana
+Figma
+Adobe XD
+Photoshop
+Illustrator
+InDesign
+Blender
+Unreal Engine
+Godot
+VS Code
+Visual Studio
+IntelliJ IDEA
+PyCharm
+WebStorm
+GoLand
+CLion
+NetBeans
+Vim
+Neovim
+Emacs
+Sublime Text
+Xcode
+Android Studio
+Postman
+Insomnia
+Wget
+jq
+tmux
+Zsh
+Oh My Zsh
+Homebrew
+Flatpak
+AppImage
+Microsoft
+Google
+Nvidia
+NVIDIA
+AMD
+Intel
+Qualcomm
+Samsung
+Huawei
+Xiaomi
+Tencent
+Alibaba
+ByteDance
+Cisco
+SAP
+Salesforce
+Adobe
+IBM
+Red Hat
+Canonical
+SUSE
+Debian
+Ubuntu
+Fedora
+CentOS
+Rocky Linux
+AlmaLinux
+Arch Linux
+Alpine Linux
+Linux
+GNU
+Apache Software Foundation
+Mozilla
+Firefox
+Chrome
+Chromium
+WebKit
+V8
+OpenSSL
+Let's Encrypt
+Auth0
+Okta
+Keycloak
+HashiCorp
+SpaceX
+
+# --- 本项目 / 验收页相关 ---
+OpenCode
+OpenCode Go

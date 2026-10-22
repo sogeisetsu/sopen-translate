@@ -47,12 +47,12 @@
 - [x] B3 `content.css`：`.sopen-translated-block`（唯一作用域例外）
 - [x] B4 popup：圆形主按钮 + 模式切换 + 语言下拉 + 轮询进度
 - [x] B5 验收 B：`npm run smoke:dom` 通过（新增用例见 B5）
-- [ ] C1 词库：`glossary-allowlist.txt`、`glossary-snapshot.json`、`build-glossary.mjs` → `lib/glossary-data.json`（离线、入库）
-- [ ] C2 术语匹配：`lib/glossary.js`（纯函数）
-- [ ] C3 prompt 注入 + 译后校验 + 修复重试（在 pipeline 内）
-- [ ] C4 设置页：术语表编辑 + 内置词库开关 + 三档说明 + 关于与许可
-- [ ] C5 `THIRD-PARTY-NOTICES.md`
-- [ ] C6 验收 C：三套命令全绿 + 四个真机页面手工验收 + `build:glossary` 幂等
+- [x] C1 词库：`glossary-allowlist.txt`、`glossary-snapshot.json`、`build-glossary.mjs` → `lib/glossary-data.json`（离线、入库）
+- [x] C2 术语匹配：`lib/glossary.js`（纯函数）
+- [x] C3 prompt 注入 + 译后校验 + 修复重试（在 pipeline 内）
+- [x] C4 设置页：术语表编辑 + 内置词库开关 + 三档说明 + 关于与许可
+- [x] C5 `THIRD-PARTY-NOTICES.md`
+- [ ] C6 验收 C：三套命令全绿 + 四个真机页面手工验收 + `build:glossary` 幂等（三套命令与 `build:glossary --check` 已通过；四个真机页面未跑，本机无已加载扩展的浏览器会话）
 - [ ] D1 收尾：`manifest.json` 版本 0.2.0，README / AGENTS.md / package.json 同步
 
 ---
