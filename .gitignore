@@ -23,3 +23,7 @@ secrets.json
 .DS_Store
 Thumbs.db
 *.log
+
+# local agent tooling — skills are installed for local debugging, not part of the extension
+.agents/
+skills-lock.json
