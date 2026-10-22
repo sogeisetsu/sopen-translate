@@ -9,6 +9,14 @@ MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可�
 - 不用 TypeScript 写源码，也不用打包工具。类型靠 JSDoc + `checkJs` 静态检查（`npm run check`），浏览器加载的仍是 `extension/` 里的原始 `.js`，不存在构建产物。`package.json` 里只有 `typescript`、`@types/chrome` 两个 devDependency。
 - 无后端：请求由 service worker 直接发往用户在设置页填的接口地址。
 
+## 绝对禁止：仓库里不许出现任何隐私数据
+
+- **任何 API Key、token、密钥、账号密码、cookie、个人邮箱/手机号，一律不准写进这个仓库的任何文件**：源码、注释、示例、测试、文档、计划、commit message、issue/PR 正文都不行。这个仓库是公开的，推到 GitHub 就等于泄露。
+- 密钥只允许存在于两个地方：运行时用户的 `chrome.storage.local`，或开发期 OpenChamber 项目的环境变量（`.config/openchamber/environment.json`，不在仓库内）。代码里只准出现占位符，如 `sk-...`、`<YOUR_API_KEY>`、`d735...:fx`。
+- 不要为了"方便测试"把真实 key 塞进 `scripts/`、`.env`、临时 JSON 或 fixture；冒烟测试一律 stub `fetch`，不联网、不需要 key。
+- 需要核实某个 key 是否可用时，从环境变量读、在命令行里用，不要落盘、不要打印、不要在回复里复述。
+- `.gitignore` 已屏蔽 `.env*`、`keys.json`、`secrets.json`；新增凭据文件时同步加进去。提交前扫一眼 `git diff`，发现 key 立刻删掉并视为已泄露（改 key，而不是只删文件）。
+
 ## 分层与硬约束
 
 - `extension/background.js`（`type: module`）是**唯一出网口**，也是唯一读 `chrome.storage.local` 里密钥的地方。content script 拿不到 key、不 `fetch`，只发消息。
