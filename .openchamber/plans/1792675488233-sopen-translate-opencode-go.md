@@ -52,7 +52,7 @@
 - [x] C3 prompt 注入 + 译后校验 + 修复重试（在 pipeline 内）
 - [x] C4 设置页：术语表编辑 + 内置词库开关 + 三档说明 + 关于与许可
 - [x] C5 `THIRD-PARTY-NOTICES.md`
-- [ ] C6 验收 C：三套命令全绿 + 四个真机页面手工验收 + `build:glossary` 幂等（三套命令与 `build:glossary --check` 已通过；四个真机页面未跑，本机无已加载扩展的浏览器会话）
+- [x] C6 验收 C：三套命令全绿 + 四个真机页面手工验收 + `build:glossary` 幂等（2026-10-23 完成，记录见 C6 末尾）
 - [x] D1 收尾：`manifest.json` 版本 0.2.0，README / AGENTS.md / package.json 同步
 
 ---
@@ -66,7 +66,7 @@
 | 商汤 | `sensenova-6.8-flash-lite` | 只这一个 |
 | OpenCode Go | `deepseek-v4.1-flash` | ✅ 已实测可用 |
 | OpenCode Go | `mimo-v2.6-flash` | ✅ 已实测可用 |
-| OpenCode Go | `minimax-m3.1-flash-free` | 名字里的 `-free` 就是免费档，优先用它 |
+| OpenCode Go | `minimax-m3.1-flash-free` | ⚠️ **2026-10-23 实测已下线**：`410 ModelDeprecated`。改用 `mimo-v2.6-flash` |
 | OpenCode Go | ~~`longcat-2.5-preview`~~ | ❌ **已排除**：面板可见但 API 打不通（`402 Endpoint is unavailable` / `400 Model is unavailable`），`/models` 里也没有它。不要测、不要找替代模型 |
 | DeepL | 无需选模型 | ✅ key 已验证，字符额度 0/1,000,000 |
 
@@ -1341,6 +1341,33 @@ Modified: extracted ASCII term fragments from zh-cn glossary titles only.
   6. 模型下拉刷新能拿到 OpenCode Go 的 36 个模型；断网/错 key 时退回预设且不弹红字；
   7. 语言下拉在 popup 与设置页回显一致；
   8. 设置页保存后重新打开，`enforcement` / `useBuiltin` / 用户词表 / 语言都还在。
+
+### C6 验收记录（2026-10-23）
+
+真机环境：Edge 157（headless=new）加载 `extension/` 未打包目录；通过 CDP 在扩展页用
+`chrome.tabs.sendMessage` 驱动，与 popup 走同一条消息路径。密钥只从 OpenChamber
+环境变量读入内存，未写入仓库或日志。
+
+| 页面 | 模型 | 纯译文 | 双语 | 还原 |
+| --- | --- | --- | --- | --- |
+| `opencode.ai/go` | `deepseek-v4.1-flash` | PASS：translated 170，spans 0 | PASS：translated 130，spans 130 | PASS：textLen 2820 → 2820 |
+| GitHub issue #55772 | `deepseek-v4.1-flash` | PASS：translated 203，spans 0 | PASS：translated 103，spans 103 | PASS：textLen 3138 → 3138，p/li 数量不变 |
+| `linux.org/pages/download` | `deepseek-v4.1-flash` | PASS：translated 91，spans 0 | PASS：translated 25，spans 25 | PASS：textLen 1468 → 1468 |
+| `en.wikipedia.org/wiki/Linux` | DeepL | PASS：translated 3143，failed 0，spans 0 | PASS：translated 676，failed 0，spans 676 | PASS：textLen 77649 → 77649，td 101/li 1155 不变 |
+
+- `DeepSeek V4.1 Flash`：`opencode.ai/go` 两种模式翻译前后都存在（`hasModelName` true → true）。
+- 双语模式下四页的 `p` / `li` / `td` 数量均未变化；还原后 `.sopen-translated-block` 均为 0。
+- provider 回归（`testProvider`，3 段样本）：OpenCode Go `deepseek-v4.1-flash`、商汤
+  `sensenova-6.8-flash-lite`、DeepL 全部返回 ok（3/3）。
+- 设置页 / popup 真机检查 23/23：12 预设 + 自定义分组、默认 `repair` 与三档说明、
+  语言 10 项、保存后重开字段全在、`models.list` 联网拿到 36 个模型、错 key 静默回退预设
+  （6 条）、popup 语言/模式/版本回显一致。
+- Wikipedia 的 OpenCode Go 尝试：`deepseek-v4.1-flash` 在 25 分钟跑到 1891/4128 后触发
+  脚本超时；`mimo-v2.6-flash` 在 480/4128 处连续 3 批 429 触发熔断（translated 332，
+  failed 120，stopped true）；`minimax-m3.1-flash-free` 已下线（410 ModelDeprecated）。
+  最终用 DeepL 完成该页完整两模式验收。熔断行为与计划预期一致。
+- 未覆盖：其余 9 个预设仍只有路由级验证（按计划不跑真机）；三档术语策略的行为由
+  `npm run smoke` 的确定性用例覆盖，真机只核对了设置页文案，未刻意构造“真实模型漏词”。
 
 ---
 
