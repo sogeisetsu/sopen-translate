@@ -156,7 +156,8 @@ async function refreshModels(index) {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'models.list', provider });
     const models = Array.isArray(res?.models) ? res.models.map(String) : [];
-    if (res?.from !== 'preset' && models.length > 0) {
+    // 只有真正联网拿到的列表才更新缓存时间；cache / preset 都不要续期
+    if (res?.from === 'network' && models.length > 0) {
       provider.modelsCache = {
         at: Date.now(),
         list: models,
@@ -168,9 +169,11 @@ async function refreshModels(index) {
       provider.id,
       res?.from === 'preset'
         ? '接口没返回列表，使用预设建议'
-        : res?.cached === false
-          ? '已用草稿配置获取；保存后再刷新可缓存'
-          : `已获取 ${models.length} 个模型`,
+        : res?.from === 'cache'
+          ? `使用缓存：${models.length} 个模型`
+          : res?.cached === false
+            ? '已用草稿配置获取；保存后再刷新可缓存'
+            : `已获取 ${models.length} 个模型`,
     );
   } catch {
     state.modelNotice.set(provider.id, '接口没返回列表，使用预设建议');
@@ -305,7 +308,7 @@ function providerCard(provider, index) {
     h(
       'label',
       { class: 'field' },
-      h('span', { text: isCustom ? 'API Key（可空）' : 'API Key（必填）' }),
+      h('span', { text: isCustom && !isDeepl ? 'API Key（可空）' : 'API Key（必填）' }),
       h('input', {
         class: 'input',
         type: 'password',

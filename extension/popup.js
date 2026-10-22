@@ -216,7 +216,11 @@ mainBtn.addEventListener('click', async () => {
     } catch (err) {
       setMessage(err instanceof Error ? err.message : String(err), true);
     }
-    state.page = /** @type {PageStatus} */ (await askTab(tabId, { type: 'page.status' }));
+    try {
+      state.page = /** @type {PageStatus} */ (await askTab(tabId, { type: 'page.status' }));
+    } catch {
+      state.page = null;
+    }
     render();
     return;
   }
