@@ -1,8 +1,30 @@
-import { PROVIDER_TYPES, getProviderType } from './lib/providers.js';
-import { getSettings, saveSettings } from './lib/settings.js';
+/**
+ * 设置页：预设服务管理、模型下拉、目标语言、术语表。
+ *
+ * 出网只发生在 background（模型列表也走 `models.list` 消息），
+ * 这里只读写 `chrome.storage.local` 里的草稿。
+ */
+
+import { getSettings, mergeProviderCaches, saveSettings } from './lib/settings.js';
+import { PROVIDER_PRESETS, getPreset } from './lib/provider-presets.js';
+import { PROTOCOL_OPTIONS } from './lib/protocols.js';
+import { resolveModelsUrl } from './lib/models.js';
+import { LANGUAGES, findLanguage } from './lib/languages.js';
+import { normalizeTerms } from './lib/glossary.js';
 
 /** @typedef {import('../types').Settings} Settings */
 /** @typedef {import('../types').ProviderConfig} ProviderConfig */
+/** @typedef {import('../types').EnforcementMode} EnforcementMode */
+/** @typedef {import('./lib/provider-presets.js').ProviderPreset} ProviderPreset */
+
+const MODELS_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+
+/** 三档策略的后果必须写清楚，不能只靠 `<option>` 的短标签 */
+const ENFORCEMENT_HELP = {
+  fallback: '漏词就整段保留原文。最保守，可能出现成片未翻译。',
+  repair: '先只重翻漏词段，仍漏才保留原文。默认。',
+  warn: '译文照常显示，只在结果里提示可能漏词。最流畅。',
+};
 
 /**
  * @param {string} id
@@ -16,15 +38,28 @@ function pick(id) {
 
 const providersEl = /** @type {HTMLDivElement} */ (pick('providers'));
 const countEl = pick('provider-count');
-const addTypeEl = /** @type {HTMLSelectElement} */ (pick('add-type'));
+const addPresetEl = /** @type {HTMLSelectElement} */ (pick('add-preset'));
 const addBtn = /** @type {HTMLButtonElement} */ (pick('add'));
 const saveBtn = /** @type {HTMLButtonElement} */ (pick('save'));
 const saveMessageEl = pick('save-message');
-const targetLangEl = /** @type {HTMLInputElement} */ (pick('target-lang'));
-const targetLangCodeEl = /** @type {HTMLInputElement} */ (pick('target-lang-code'));
+const targetLangEl = /** @type {HTMLSelectElement} */ (pick('target-lang'));
+const useBuiltinEl = /** @type {HTMLInputElement} */ (pick('use-builtin'));
+const termsEl = /** @type {HTMLTextAreaElement} */ (pick('glossary-terms'));
+const enforcementEl = /** @type {HTMLSelectElement} */ (pick('enforcement'));
+const enforcementHelpEl = pick('enforcement-help');
+const glossaryMetaEl = pick('glossary-meta');
+const appVersionEl = pick('app-version');
 
-/** @type {{ draft: Settings | null }} */
-const state = { draft: null };
+const state = {
+  /** @type {Settings | null} */
+  draft: null,
+  /** @type {Settings | null} */
+  stored: null,
+  /** 手动输入模型的 provider id */
+  manualModel: new Set(),
+  /** provider id → 一行提示 */
+  modelNotice: new Map(),
+};
 
 /** @returns {Settings} */
 function getDraft() {
@@ -51,22 +86,97 @@ function h(tag, props = {}, ...children) {
   return node;
 }
 
-/**
- * 按 provider 类型声明检查必填字段
- * @param {ProviderConfig} provider
- * @returns {string[]} 缺失字段的标签，空数组表示通过
- */
-function missingRequired(provider) {
-  const type = getProviderType(provider.type);
-  const values = /** @type {Record<string, any>} */ (provider);
-  return type.fields
-    .filter((field) => field.required && !String(values[field.key] ?? '').trim())
-    .map((field) => field.label);
-}
-
 function setSaved(text, isError = false) {
   saveMessageEl.textContent = text;
   saveMessageEl.classList.toggle('is-error', isError);
+}
+
+/* -------------------------------- 校验 -------------------------------- */
+
+/**
+ * 必填矩阵见计划 A6.5：
+ * - 内置 LLM 预设：apiKey、model
+ * - DeepL：apiKey、baseUrl
+ * - custom + LLM：protocol、baseUrl、model（apiKey 可空）
+ * - custom + deepl：protocol、baseUrl、apiKey
+ * @param {ProviderConfig} provider
+ * @returns {string[]}
+ */
+function missingRequired(provider) {
+  const isCustom = provider.presetId === 'custom';
+  /** @type {string[]} */
+  const missing = [];
+  if (!String(provider.baseUrl ?? '').trim()) missing.push('接口地址');
+
+  if (provider.protocol === 'deepl') {
+    if (!String(provider.apiKey ?? '').trim()) missing.push('API Key');
+    return missing;
+  }
+
+  if (!String(provider.model ?? '').trim()) missing.push('模型');
+  if (isCustom) {
+    if (!provider.protocol) missing.push('协议');
+  } else if (!String(provider.apiKey ?? '').trim()) {
+    missing.push('API Key');
+  }
+  return missing;
+}
+
+/* -------------------------------- 模型 -------------------------------- */
+
+/**
+ * 缓存未过期且 URL 一致时用缓存，否则用预设建议；当前模型不在列表里也保留一项。
+ * @param {ProviderConfig} provider
+ * @returns {string[]}
+ */
+function modelChoices(provider) {
+  const preset = getPreset(provider.presetId);
+  const cache = provider.modelsCache;
+  const url = resolveModelsUrl(provider);
+  const usable =
+    cache && cache.forUrl === url && Date.now() - cache.at < MODELS_CACHE_TTL ? cache.list : null;
+  const base = usable && usable.length ? usable : preset.models || [];
+  const choices = base.slice();
+  const current = String(provider.model ?? '').trim();
+  if (current && !choices.includes(current)) choices.unshift(current);
+  return choices;
+}
+
+/**
+ * 调 background 拉列表；失败一律安静降级，不弹红字。
+ * @param {number} index
+ */
+async function refreshModels(index) {
+  const provider = getDraft().providers[index];
+  if (!provider) return;
+
+  state.modelNotice.set(provider.id, '正在获取模型…');
+  renderProviders();
+
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'models.list', provider });
+    const models = Array.isArray(res?.models) ? res.models.map(String) : [];
+    if (res?.from !== 'preset' && models.length > 0) {
+      provider.modelsCache = {
+        at: Date.now(),
+        list: models,
+        forUrl: resolveModelsUrl(provider),
+      };
+      if (!String(provider.model ?? '').trim()) provider.model = models[0];
+    }
+    state.modelNotice.set(
+      provider.id,
+      res?.from === 'preset'
+        ? '接口没返回列表，使用预设建议'
+        : res?.cached === false
+          ? '已用草稿配置获取；保存后再刷新可缓存'
+          : `已获取 ${models.length} 个模型`,
+    );
+  } catch {
+    state.modelNotice.set(provider.id, '接口没返回列表，使用预设建议');
+  }
+
+  renderProviders();
 }
 
 /* -------------------------------- 渲染 -------------------------------- */
@@ -74,22 +184,109 @@ function setSaved(text, isError = false) {
 /**
  * @param {ProviderConfig} provider
  * @param {number} index
+ * @param {ProviderPreset} preset
+ * @returns {HTMLElement}
+ */
+function modelField(provider, index, preset) {
+  const manual = state.manualModel.has(provider.id);
+  const notice = state.modelNotice.get(provider.id) || '';
+
+  /** @type {HTMLElement} */
+  let control;
+  if (manual) {
+    control = /** @type {HTMLElement} */ (
+      h('input', {
+        class: 'input',
+        value: provider.model || '',
+        placeholder: preset.models[0] || '模型 id',
+        spellcheck: false,
+        dataset: { index, field: 'model' },
+      })
+    );
+  } else {
+    const choices = modelChoices(provider);
+    const select = h(
+      'select',
+      { class: 'input', dataset: { index, field: 'model' } },
+      ...choices.map((id) =>
+        h('option', { value: id, text: id, selected: id === provider.model }),
+      ),
+    );
+    if (choices.length === 0) select.append(h('option', { value: '', text: '（先刷新模型列表）' }));
+    control = select;
+  }
+
+  return h(
+    'div',
+    { class: 'field' },
+    h('span', { text: '模型' }),
+    h(
+      'div',
+      { class: 'model-row' },
+      control,
+      h('button', {
+        class: 'btn small',
+        type: 'button',
+        text: '刷新',
+        dataset: { action: 'refresh-models', index },
+      }),
+      h('button', {
+        class: 'btn small',
+        type: 'button',
+        text: manual ? '从列表选择' : '手动输入',
+        dataset: { action: 'toggle-model', index },
+      }),
+    ),
+    notice ? h('span', { class: 'note', text: notice }) : null,
+  );
+}
+
+/**
+ * @param {ProviderConfig} provider
+ * @param {number} index
+ * @returns {HTMLElement}
+ */
+function protocolField(provider, index) {
+  return h(
+    'label',
+    { class: 'field' },
+    h('span', { text: '协议' }),
+    h(
+      'select',
+      { class: 'input', dataset: { index, field: 'protocol' } },
+      ...PROTOCOL_OPTIONS.map((option) =>
+        h('option', {
+          value: option.id,
+          text: option.label,
+          selected: option.id === provider.protocol,
+        }),
+      ),
+    ),
+  );
+}
+
+/**
+ * @param {ProviderConfig} provider
+ * @param {number} index
  * @returns {HTMLElement}
  */
 function providerCard(provider, index) {
-  const type = getProviderType(provider.type);
+  const preset = getPreset(provider.presetId);
+  const isCustom = provider.presetId === 'custom';
+  const isDeepl = provider.protocol === 'deepl';
 
   const head = h(
     'div',
     { class: 'provider-head' },
     h('input', {
       class: 'input name',
-      value: provider.label || type.label,
+      value: provider.label || preset.label,
       placeholder: '区分用的名字',
       'aria-label': '服务名称',
       dataset: { index, field: 'label' },
     }),
-    h('span', { class: 'badge', text: type.label }),
+    h('span', { class: 'badge', text: preset.label }),
+    preset.verified ? null : h('span', { class: 'badge warn', text: '未实测' }),
     h(
       'label',
       { class: 'default-toggle' },
@@ -103,20 +300,57 @@ function providerCard(provider, index) {
     ),
   );
 
-  const fields = type.fields.map((field) =>
+  /** @type {HTMLElement[]} */
+  const fields = [
     h(
       'label',
       { class: 'field' },
-      h('span', { text: field.label + (field.required ? '（必填）' : '') }),
+      h('span', { text: isCustom ? 'API Key（可空）' : 'API Key（必填）' }),
       h('input', {
         class: 'input',
-        type: field.secret ? 'password' : 'text',
-        value: provider[/** @type {keyof ProviderConfig} */ (field.key)] ?? '',
-        placeholder: field.placeholder || '',
+        type: 'password',
+        value: provider.apiKey ?? '',
+        placeholder: 'sk-...',
         autocomplete: 'off',
         spellcheck: false,
-        dataset: { index, field: field.key },
+        dataset: { index, field: 'apiKey' },
       }),
+    ),
+  ];
+  if (!isDeepl) fields.push(modelField(provider, index, preset));
+  if (isCustom) fields.push(protocolField(provider, index));
+
+  const advanced = h(
+    'details',
+    { class: 'advanced' },
+    h('summary', { text: '高级：自定义接口地址' }),
+    h(
+      'div',
+      { class: 'grid' },
+      h(
+        'label',
+        { class: 'field' },
+        h('span', { text: 'baseUrl' }),
+        h('input', {
+          class: 'input',
+          value: provider.baseUrl ?? '',
+          placeholder: preset.baseUrl || 'https://...',
+          spellcheck: false,
+          dataset: { index, field: 'baseUrl' },
+        }),
+      ),
+      h(
+        'label',
+        { class: 'field' },
+        h('span', { text: 'modelsUrl（留空自动推导）' }),
+        h('input', {
+          class: 'input',
+          value: provider.modelsUrl ?? '',
+          placeholder: resolveModelsUrl(provider) || 'https://.../models',
+          spellcheck: false,
+          dataset: { index, field: 'modelsUrl' },
+        }),
+      ),
     ),
   );
 
@@ -140,10 +374,18 @@ function providerCard(provider, index) {
     result,
   );
 
-  return h('div', { class: 'provider', dataset: { index } }, head, h('div', { class: 'grid' }, ...fields), actions);
+  return h(
+    'div',
+    { class: 'provider', dataset: { index } },
+    head,
+    h('div', { class: 'grid' }, ...fields),
+    advanced,
+    actions,
+    preset.hint ? h('p', { class: 'hint muted', text: preset.hint }) : null,
+  );
 }
 
-function render() {
+function renderProviders() {
   const draft = getDraft();
   providersEl.replaceChildren();
 
@@ -153,36 +395,153 @@ function render() {
     providersEl.append(
       h('p', {
         class: 'empty',
-        text: '还没有翻译服务。选一个类型，添加后填入接口地址和密钥。',
+        text: '还没有翻译服务。选一个预设，添加后填入密钥。',
       }),
     );
-  } else {
-    draft.providers.forEach((provider, index) =>
-      providersEl.append(providerCard(provider, index)),
+    return;
+  }
+
+  draft.providers.forEach((provider, index) =>
+    providersEl.append(providerCard(provider, index)),
+  );
+}
+
+function renderLanguages() {
+  const draft = getDraft();
+  targetLangEl.replaceChildren();
+
+  const known = findLanguage(draft.targetLang);
+  if (!known) {
+    // 老用户的自定义目标语言：保留为只读项，不静默改成简体中文
+    const current = draft.targetLang || '（空）';
+    targetLangEl.append(
+      h('option', {
+        value: current,
+        text: `当前：${current}（不在列表）`,
+        selected: true,
+        disabled: true,
+      }),
     );
   }
 
-  targetLangEl.value = draft.targetLang || '';
-  targetLangCodeEl.value = draft.targetLangCode || '';
+  for (const language of LANGUAGES) {
+    targetLangEl.append(
+      h('option', {
+        value: language.name,
+        text: language.name,
+        selected: known ? language.id === known.id : false,
+      }),
+    );
+  }
+}
+
+function renderForm() {
+  const draft = getDraft();
+  useBuiltinEl.checked = draft.glossary.useBuiltin;
+  termsEl.value = draft.glossary.terms.join('\n');
+  enforcementEl.value = draft.enforcement;
+  updateEnforcementHelp();
+  appVersionEl.textContent = chrome.runtime.getManifest().version;
+}
+
+function updateEnforcementHelp() {
+  enforcementHelpEl.textContent =
+    ENFORCEMENT_HELP[/** @type {keyof typeof ENFORCEMENT_HELP} */ (enforcementEl.value)] || '';
+}
+
+function renderAll() {
+  renderProviders();
+  renderLanguages();
+  renderForm();
+}
+
+/* -------------------------------- 添加服务 -------------------------------- */
+
+function presetOptions() {
+  const rest = PROVIDER_PRESETS.filter((preset) => preset.id !== 'custom');
+  const custom = getPreset('custom');
+
+  /**
+   * @param {string} label
+   * @param {ProviderPreset[]} presets
+   */
+  const group = (label, presets) =>
+    h(
+      'optgroup',
+      { label },
+      ...presets.map((preset) => h('option', { value: preset.id, text: preset.label })),
+    );
+
+  addPresetEl.append(
+    group(
+      '已验证',
+      rest.filter((preset) => preset.verified),
+    ),
+    group(
+      '接口未实测',
+      rest.filter((preset) => !preset.verified),
+    ),
+    group('自定义', [custom]),
+  );
 }
 
 /* -------------------------------- 交互 -------------------------------- */
 
+/**
+ * @param {HTMLElement} target
+ * @returns {ProviderConfig | null}
+ */
+function applyField(target) {
+  const index = Number(target.dataset.index);
+  const field = target.dataset.field;
+  if (!field || !Number.isInteger(index)) return null;
+  const provider = getDraft().providers[index];
+  if (!provider) return null;
+
+  if (field === 'active') {
+    if (/** @type {HTMLInputElement} */ (target).checked) {
+      getDraft().activeProviderId = provider.id;
+    }
+    return provider;
+  }
+
+  const value = /** @type {any} */ (target).value;
+  if (typeof value !== 'string') return provider;
+
+  if (field === 'label') provider.label = value;
+  else if (field === 'apiKey') provider.apiKey = value;
+  else if (field === 'model') provider.model = value;
+  else if (field === 'baseUrl') {
+    provider.baseUrl = value;
+    delete provider.modelsCache;
+  } else if (field === 'modelsUrl') {
+    provider.modelsUrl = value;
+    delete provider.modelsCache;
+  } else if (field === 'protocol') {
+    provider.protocol = /** @type {ProviderConfig['protocol']} */ (value);
+  }
+
+  return provider;
+}
+
 providersEl.addEventListener('input', (event) => {
-  const target = /** @type {HTMLInputElement} */ (event.target);
-  const { index, field } = target.dataset;
-  if (index == null || !field || field === 'active') return;
-  const provider = getDraft().providers[Number(index)];
-  if (!provider) return;
-  /** @type {any} */ (provider)[field] = target.value;
+  const target = /** @type {HTMLElement} */ (event.target);
+  applyField(target);
 });
 
 providersEl.addEventListener('change', (event) => {
-  const target = /** @type {HTMLInputElement} */ (event.target);
-  const { index, field } = target.dataset;
-  if (field !== 'active' || index == null) return;
-  const draft = getDraft();
-  draft.activeProviderId = draft.providers[Number(index)]?.id ?? null;
+  const target = /** @type {HTMLElement} */ (event.target);
+  const provider = applyField(target);
+  if (!provider) return;
+  const field = target.dataset.field;
+  const value = /** @type {any} */ (target).value;
+
+  // API Key 填到一定长度就自动拉一次模型列表，省掉一次手动点击
+  if (field === 'apiKey' && String(value ?? '').trim().length > 8) {
+    void refreshModels(Number(target.dataset.index));
+  }
+  // 切到 DeepL 要隐藏模型字段，切回来要恢复
+  if (field === 'protocol') renderProviders();
 });
 
 providersEl.addEventListener('click', async (event) => {
@@ -199,8 +558,22 @@ providersEl.addEventListener('click', async (event) => {
     if (draft.activeProviderId === provider.id) {
       draft.activeProviderId = draft.providers[0]?.id ?? null;
     }
-    render();
+    state.manualModel.delete(provider.id);
+    state.modelNotice.delete(provider.id);
+    renderProviders();
     setSaved('已删除，记得保存');
+    return;
+  }
+
+  if (button.dataset.action === 'toggle-model') {
+    if (state.manualModel.has(provider.id)) state.manualModel.delete(provider.id);
+    else state.manualModel.add(provider.id);
+    renderProviders();
+    return;
+  }
+
+  if (button.dataset.action === 'refresh-models') {
+    await refreshModels(index);
     return;
   }
 
@@ -234,29 +607,29 @@ providersEl.addEventListener('click', async (event) => {
   }
 });
 
-addTypeEl.append(
-  ...PROVIDER_TYPES.map((type) => h('option', { value: type.type, text: type.label })),
-);
-
 addBtn.addEventListener('click', () => {
-  const type = getProviderType(/** @type {HTMLSelectElement} */ (addTypeEl).value);
+  const preset = getPreset(addPresetEl.value);
   const draft = getDraft();
-  const used = draft.providers.filter((p) => p.type === type.type).length;
+  const used = draft.providers.filter((provider) => provider.presetId === preset.id).length;
+  /** @type {ProviderConfig} */
   const provider = {
     id: crypto.randomUUID(),
-    type: type.type,
-    label: used ? `${type.label} ${used + 1}` : type.label,
+    presetId: preset.id,
+    protocol: preset.protocol,
+    label: used ? `${preset.label} ${used + 1}` : preset.label,
+    baseUrl: preset.baseUrl,
+    model: preset.models[0] || '',
   };
   draft.providers.push(provider);
   if (!draft.activeProviderId) draft.activeProviderId = provider.id;
-  render();
+  renderProviders();
   setSaved('已添加，填好字段后保存');
 });
 
+enforcementEl.addEventListener('change', updateEnforcementHelp);
+
 saveBtn.addEventListener('click', async () => {
   const draft = getDraft();
-  draft.targetLang = targetLangEl.value.trim() || '简体中文';
-  draft.targetLangCode = targetLangCodeEl.value.trim().toUpperCase() || 'ZH';
 
   const invalid = draft.providers
     .map((provider) => ({ provider, missing: missingRequired(provider) }))
@@ -264,7 +637,7 @@ saveBtn.addEventListener('click', async () => {
   if (invalid.length > 0) {
     const detail = invalid
       .map(({ provider, missing }) => {
-        const name = provider.label || getProviderType(provider.type).label;
+        const name = provider.label || getPreset(provider.presetId).label;
         return `${name}（缺 ${missing.join('、')}）`;
       })
       .join('；');
@@ -272,9 +645,27 @@ saveBtn.addEventListener('click', async () => {
     return;
   }
 
+  const language = findLanguage(targetLangEl.value);
+  const targetLang = language ? language.name : draft.targetLang;
+  const targetLangCode = language ? language.code : draft.targetLangCode;
+
   saveBtn.disabled = true;
   try {
-    state.draft = await saveSettings(draft);
+    const stored = state.stored || draft;
+    state.draft = await saveSettings({
+      // 只提交设置页负责的字段：displayMode 归 popup，sessionId 归 getSessionId()
+      providers: mergeProviderCaches(draft.providers, stored.providers),
+      activeProviderId: draft.activeProviderId,
+      targetLang,
+      targetLangCode,
+      enforcement: /** @type {EnforcementMode} */ (enforcementEl.value),
+      glossary: {
+        useBuiltin: useBuiltinEl.checked,
+        terms: normalizeTerms(termsEl.value.split('\n')),
+      },
+    });
+    state.stored = structuredClone(state.draft);
+    renderAll();
     setSaved('已保存');
   } catch (err) {
     setSaved(`保存失败：${err instanceof Error ? err.message : String(err)}`, true);
@@ -285,9 +676,29 @@ saveBtn.addEventListener('click', async () => {
 
 /* -------------------------------- 启动 -------------------------------- */
 
+async function showGlossaryMeta() {
+  try {
+    const res = await fetch(chrome.runtime.getURL('lib/glossary-data.json'));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const count = Number(data?.count ?? (Array.isArray(data?.terms) ? data.terms.length : 0));
+    glossaryMetaEl.textContent = `内置 ${count} 条${
+      data?.generatedAt ? `（${data.generatedAt}）` : ''
+    }`;
+  } catch {
+    glossaryMetaEl.textContent = '内置词库尚未生成，先跑 npm run build:glossary';
+  }
+}
+
+presetOptions();
+
 getSettings()
   .then((settings) => {
     state.draft = structuredClone(settings);
-    render();
+    state.stored = structuredClone(settings);
+    renderAll();
+    void showGlossaryMeta();
   })
-  .catch((err) => setSaved(`读取设置失败：${err instanceof Error ? err.message : String(err)}`, true));
+  .catch((err) =>
+    setSaved(`读取设置失败：${err instanceof Error ? err.message : String(err)}`, true),
+  );

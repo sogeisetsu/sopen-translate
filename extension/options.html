@@ -22,7 +22,7 @@
         </div>
         <div id="providers" class="providers"></div>
         <div class="add-row">
-          <select id="add-type" class="input"></select>
+          <select id="add-preset" class="input" aria-label="要添加的翻译服务"></select>
           <button id="add" class="btn" type="button">添加服务</button>
         </div>
       </section>
@@ -31,16 +31,82 @@
         <div class="card-head">
           <h2>目标语言</h2>
         </div>
-        <div class="grid">
-          <label class="field">
-            <span>语言名称（给大模型用）</span>
-            <input id="target-lang" class="input" placeholder="简体中文" />
-          </label>
-          <label class="field">
-            <span>语言代码（DeepL 用）</span>
-            <input id="target-lang-code" class="input" placeholder="ZH" />
-          </label>
+        <label class="field">
+          <span>翻译成</span>
+          <select id="target-lang" class="input"></select>
+        </label>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>术语保护</h2>
+          <span id="glossary-meta" class="muted"></span>
         </div>
+        <label class="checkbox">
+          <input id="use-builtin" type="checkbox" />
+          <span>使用内置词库（品牌 / 产品 / 协议名保持原文）</span>
+        </label>
+        <label class="field">
+          <span>自定义词表：一行一个词，只做“保持原文”</span>
+          <textarea
+            id="glossary-terms"
+            class="input"
+            rows="6"
+            spellcheck="false"
+            placeholder="例如：&#10;Kubernetes&#10;DeepSeek V4.1 Flash"
+          ></textarea>
+        </label>
+        <label class="field">
+          <span>漏词时怎么办</span>
+          <select id="enforcement" class="input">
+            <option value="fallback">fallback</option>
+            <option value="repair">repair</option>
+            <option value="warn">warn</option>
+          </select>
+        </label>
+        <p id="enforcement-help" class="muted"></p>
+        <p class="muted">
+          DeepL 没有 prompt 通道，不支持术语保护；配了 DeepL 时这一节不生效。
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>关于与许可</h2>
+        </div>
+        <p class="muted">扩展版本：<span id="app-version">—</span></p>
+        <details class="advanced">
+          <summary>第三方数据来源与许可</summary>
+          <ul class="licenses">
+            <li>
+              <a href="https://github.com/simple-icons/simple-icons" target="_blank" rel="noreferrer"
+                >simple-icons</a
+              >
+              — CC0 1.0；仅提取图标标题作为品牌名候选，并过滤通用词。
+            </li>
+            <li>
+              <a href="https://github.com/cncf/glossary" target="_blank" rel="noreferrer">CNCF Glossary</a>
+              — CC BY 4.0；仅从中文词条标题中抽取 ASCII 术语片段。
+              © Cloud Native Computing Foundation，有改动。
+            </li>
+            <li>
+              <a href="https://github.com/github-linguist/linguist" target="_blank" rel="noreferrer"
+                >github/linguist</a
+              >
+              — MIT；仅用于核对语言名拼写。
+            </li>
+            <li>
+              <a href="https://models.dev" target="_blank" rel="noreferrer">models.dev</a>
+              — 模型名清单来源；仅提取名称并过滤通用词。
+            </li>
+            <li>
+              <a href="https://github.com/sogeisetsu/sopen-translate" target="_blank" rel="noreferrer"
+                >sopen-translate</a
+              >
+              — 本项目仓库（含完整的 THIRD-PARTY-NOTICES.md）。
+            </li>
+          </ul>
+        </details>
       </section>
 
       <footer class="foot">

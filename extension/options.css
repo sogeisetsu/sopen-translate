@@ -90,6 +90,11 @@ code {
   white-space: nowrap;
 }
 
+.badge.warn {
+  background: #fff1e5;
+  color: #9a5b13;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -171,6 +176,78 @@ code {
 
 .provider-actions .result.is-error {
   color: #cf222e;
+}
+
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.btn.small {
+  padding: 5px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.note {
+  color: #57606a;
+  font-size: 11px;
+}
+
+.hint {
+  margin: 8px 0 0;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #1f2328;
+}
+
+.advanced {
+  margin-top: 10px;
+}
+
+.advanced summary {
+  color: #57606a;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.advanced .grid {
+  margin-top: 8px;
+}
+
+textarea.input {
+  min-height: 96px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.licenses {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #57606a;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.licenses a {
+  color: #0969da;
+  text-decoration: none;
+}
+
+.licenses a:hover {
+  text-decoration: underline;
 }
 
 .default-toggle {

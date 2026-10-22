@@ -1,108 +1,168 @@
 /**
  * 翻译服务适配层。
  *
- * 每个 provider 实现 ProviderType（见 types.d.ts）：
- *   type        唯一标识
- *   label       设置页显示名
- *   hint        设置页说明
- *   fields      设置页要渲染的字段
- *   translate   输入 n 条文本，必须原序返回 n 条
+ * 新代码只该用 `translateBatch()`：它在协议层之上加了「等长校验 + 术语注入 + 译后校验」。
  *
- * 约定：数量对不上直接报错，宁可失败也不要把翻译错位写回页面。
+ * `getProviderType()` 是给旧调用方（老配置、旧测试）的兼容入口，不要在新代码里依赖
+ * `PROVIDER_TYPES` / `type.fields`。约定始终不变：输入 n 条文本，必须原序返回 n 条，
+ * 数量对不上直接报错——宁可失败，也不要把译文错位写回页面。
  *
  * @typedef {import('../../types').ProviderType} ProviderType
  * @typedef {import('../../types').ProviderConfig} ProviderConfig
+ * @typedef {import('../../types').TranslateArgs} TranslateArgs
+ * @typedef {import('../../types').TranslateBatchResult} TranslateBatchResult
+ * @typedef {import('../../types').Protocol} Protocol
  */
 
-class ProviderError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'ProviderError';
+import { ProviderError, fail } from './http.js';
+import { getProtocol } from './protocols.js';
+import { compileGlossary, matchTerms, promptTerms, verifySegment } from './glossary.js';
+
+/**
+ * @param {string[]} translations
+ * @param {number} expected
+ */
+function assertLength(translations, expected) {
+  if (translations.length !== expected) {
+    fail(`返回分段数不符：期望 ${expected}，实际 ${translations.length}`);
   }
 }
 
 /**
- * @param {string} message
- * @returns {never}
- */
-function fail(message) {
-  throw new ProviderError(message);
-}
-
-/** @param {unknown} err @returns {string} */
-function messageOf(err) {
-  return err instanceof Error ? err.message : String(err);
-}
-
-function trimSlash(url = '') {
-  return String(url).trim().replace(/\/+$/, '');
-}
-
-function clip(text = '', max = 240) {
-  const s = String(text).replace(/\s+/g, ' ').trim();
-  return s.length > max ? `${s.slice(0, max)}…` : s;
-}
-
-/**
- * @param {string} url
- * @param {{ headers: Record<string, string>, body: unknown }} init
- * @returns {Promise<any>}
- */
-async function postJson(url, { headers, body }) {
-  let res;
-  try {
-    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  } catch (err) {
-    fail(`无法连接 ${url}：${messageOf(err)}`);
-  }
-
-  const raw = await res.text();
-  if (!res.ok) fail(`HTTP ${res.status}：${clip(raw) || res.statusText}`);
-  try {
-    return JSON.parse(raw);
-  } catch {
-    fail(`响应不是合法 JSON：${clip(raw)}`);
-  }
-}
-
-/* ------------------------------ OpenAI 兼容 ------------------------------ */
-
-const SYSTEM_PROMPT = (target) =>
-  `你是翻译引擎。用户会给你一个 JSON 对象 {"segments": [...]}，请把 segments 里每一项逐条翻译成${target}。` +
-  `要求：返回的数组长度、顺序与原数组完全一致；不合并、不拆分、不省略、不添加解释；` +
-  `每一段只输出译文本身，不要保留原文。只返回 JSON 对象 {"segments": [...]}，不要代码块。`;
-
-/**
- * 从模型返回里抠出数组，兼容代码块包裹和多余前后缀
- * @param {string} content
+ * 去重一份「术语 + 位置」列表里的术语，保持首次出现顺序。
+ * @param {{ term: string }[]} matches
  * @returns {string[]}
  */
-function parseSegments(content) {
-  if (!content) fail('模型返回为空');
-
-  const candidates = [content];
-
-  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) candidates.push(fenced[1]);
-
-  const first = content.indexOf('{');
-  const last = content.lastIndexOf('}');
-  if (first !== -1 && last > first) candidates.push(content.slice(first, last + 1));
-
-  for (const candidate of candidates) {
-    try {
-      const data = JSON.parse(candidate.trim());
-      const arr = Array.isArray(data) ? data : data?.segments;
-      if (Array.isArray(arr)) return arr.map((item) => String(item ?? ''));
-    } catch {
-      /* 换下一个候选 */
-    }
+function uniqueTerms(matches) {
+  /** @type {string[]} */
+  const out = [];
+  const seen = new Set();
+  for (const match of matches) {
+    const key = match.term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(match.term);
   }
-  fail(`无法解析模型返回：${clip(content)}`);
+  return out;
 }
 
+/**
+ * @param {TranslateArgs} args
+ * @returns {Promise<TranslateBatchResult>}
+ */
+export async function translateBatch({
+  texts,
+  config,
+  target,
+  targetCode,
+  glossary = [],
+  enforcement = 'repair',
+  extraHeaders,
+  retry,
+}) {
+  const protocol = getProtocol(config.protocol);
+
+  // DeepL 没有 prompt 通道：完全跳过术语层，不注入、不校验、不回退。
+  if (protocol.id === 'deepl') {
+    const translations = await protocol.translate({
+      texts,
+      config,
+      target,
+      targetCode,
+      terms: [],
+      extraHeaders,
+      retry,
+    });
+    assertLength(translations, texts.length);
+    return { translations, protected: 0, warnings: [] };
+  }
+
+  const compiled = compileGlossary(Array.isArray(glossary) ? glossary : []);
+  const matches = texts.map((text) => matchTerms(text, compiled));
+  const termsForPrompt = promptTerms(matches.flat(), 40);
+  const allowed = new Set(termsForPrompt.map((term) => term.toLowerCase()));
+
+  const translations = await protocol.translate({
+    texts,
+    config,
+    target,
+    targetCode,
+    terms: termsForPrompt,
+    extraHeaders,
+    retry,
+  });
+  assertLength(translations, texts.length);
+
+  /** @type {{ index: number, missing: string[] }[]} */
+  const failures = [];
+  texts.forEach((source, index) => {
+    const verdict = verifySegment({ source, translated: translations[index], compiled, allowed });
+    if (!verdict.ok) failures.push({ index, missing: verdict.missing });
+  });
+
+  /** @type {TranslateBatchResult['warnings']} */
+  const warnings = [];
+  let protectedCount = 0;
+
+  /** @param {number} index */
+  const fallbackToSource = (index) => {
+    translations[index] = texts[index];
+    protectedCount += 1;
+  };
+
+  if (enforcement === 'fallback') {
+    for (const failure of failures) fallbackToSource(failure.index);
+  } else if (enforcement === 'warn') {
+    for (const failure of failures) {
+      warnings.push({ index: failure.index, missing: failure.missing });
+      console.debug('[sopen-translate] 术语可能未保留', failure.index, failure.missing);
+    }
+  } else if (failures.length > 0) {
+    // repair：只重发漏词的段，最多一次；第二次仍缺就回退原文。
+    const subset = failures.map((failure) => texts[failure.index]);
+    const repairTerms = uniqueTerms(failures.flatMap((failure) => failure.missing.map((term) => ({ term }))));
+    const repairAllowed = new Set(repairTerms.map((term) => term.toLowerCase()));
+
+    /** @type {string[] | null} */
+    let repaired = null;
+    try {
+      repaired = await protocol.translate({
+        texts: subset,
+        config,
+        target,
+        targetCode,
+        terms: repairTerms,
+        extraHeaders,
+        retry,
+        repair: true,
+      });
+    } catch {
+      repaired = null;
+    }
+
+    if (!repaired || repaired.length !== subset.length) {
+      for (const failure of failures) fallbackToSource(failure.index);
+    } else {
+      failures.forEach((failure, position) => {
+        const verdict = verifySegment({
+          source: texts[failure.index],
+          translated: repaired?.[position],
+          compiled,
+          allowed: repairAllowed,
+        });
+        if (verdict.ok && repaired) translations[failure.index] = repaired[position];
+        else fallbackToSource(failure.index);
+      });
+    }
+  }
+
+  return { translations, protected: protectedCount, warnings };
+}
+
+/* --------------------------- 旧调用方兼容入口 --------------------------- */
+
 /** @type {ProviderType} */
-const openai = {
+const legacyOpenai = {
   type: 'openai',
   label: 'OpenAI 兼容接口',
   hint: '适用于 OpenAI、DeepSeek、Moonshot、One-API、Ollama 等提供 /chat/completions 的服务。',
@@ -111,47 +171,21 @@ const openai = {
     { key: 'model', label: '模型', placeholder: 'gpt-4o-mini', required: true },
     { key: 'apiKey', label: 'API Key', placeholder: 'sk-...', secret: true },
   ],
-  async translate({ texts, config, target }) {
-    const endpoint = `${trimSlash(config.baseUrl)}/chat/completions`;
-
-    /** @type {Record<string, string>} */
-    const headers = { 'Content-Type': 'application/json' };
-    if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
-
-    const base = {
-      model: config.model,
-      temperature: 0,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT(target) },
-        { role: 'user', content: JSON.stringify({ segments: texts }) },
-      ],
-    };
-
-    /** @type {any} */
-    let data;
-    try {
-      // 优先要求 JSON 输出；部分兼容实现不认这个参数，失败一次再去掉重试
-      data = await postJson(endpoint, {
-        headers,
-        body: { ...base, response_format: { type: 'json_object' } },
-      });
-    } catch (err) {
-      if (!/HTTP 4\d\d/.test(messageOf(err))) throw err;
-      data = await postJson(endpoint, { headers, body: base });
-    }
-
-    const segments = parseSegments(data?.choices?.[0]?.message?.content);
-    if (segments.length !== texts.length) {
-      fail(`返回分段数不符：期望 ${texts.length}，实际 ${segments.length}`);
-    }
-    return segments;
+  async translate(args) {
+    /** @type {ProviderConfig} */
+    const config = { ...args.config, protocol: 'openai-chat' };
+    const result = await translateBatch({
+      ...args,
+      config,
+      glossary: [],
+      enforcement: 'warn',
+    });
+    return result.translations;
   },
 };
 
-/* --------------------------------- DeepL --------------------------------- */
-
 /** @type {ProviderType} */
-const deepl = {
+const legacyDeepl = {
   type: 'deepl',
   label: 'DeepL',
   hint: '免费版密钥用 https://api-free.deepl.com，付费版用 https://api.deepl.com。',
@@ -159,38 +193,34 @@ const deepl = {
     { key: 'baseUrl', label: '接口地址', placeholder: 'https://api-free.deepl.com', required: true },
     { key: 'apiKey', label: 'API Key', placeholder: ':fx 结尾的密钥', secret: true, required: true },
   ],
-  async translate({ texts, config, targetCode }) {
-    const endpoint = `${trimSlash(config.baseUrl)}/v2/translate`;
-    const data = await postJson(endpoint, {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `DeepL-Auth-Key ${config.apiKey ?? ''}`,
-      },
-      body: { text: texts, target_lang: targetCode || 'ZH' },
+  async translate(args) {
+    /** @type {ProviderConfig} */
+    const config = { ...args.config, protocol: 'deepl' };
+    const result = await translateBatch({
+      ...args,
+      config,
+      glossary: [],
+      enforcement: 'warn',
     });
-
-    const list = data?.translations;
-    if (!Array.isArray(list)) fail(`响应缺少 translations：${clip(JSON.stringify(data))}`);
-    if (list.length !== texts.length) {
-      fail(`返回分段数不符：期望 ${texts.length}，实际 ${list.length}`);
-    }
-    return list.map((/** @type {any} */ item) => String(item?.text ?? ''));
+    return result.translations;
   },
 };
 
-/* -------------------------------- 注册表 -------------------------------- */
-
 /** @type {ProviderType[]} */
-export const PROVIDER_TYPES = [openai, deepl];
+export const PROVIDER_TYPES = [legacyOpenai, legacyDeepl];
 
 /**
- * @param {string} type
- * @returns {ProviderType}
+ * `openai` / `deepl` 返回旧适配对象；五个协议 id 直接返回协议实现。
+ * @param {string} id
+ * @returns {ProviderType | Protocol}
  */
-export function getProviderType(type) {
-  const found = PROVIDER_TYPES.find((p) => p.type === type);
-  if (!found) fail(`未知的翻译服务类型：${type}`);
-  return found;
+export function getProviderType(id) {
+  const legacy = PROVIDER_TYPES.find((provider) => provider.type === id);
+  if (legacy) return legacy;
+  if (id === 'openai-chat' || id === 'openai-responses' || id === 'anthropic-messages' || id === 'google-gemini' || id === 'deepl') {
+    return getProtocol(id);
+  }
+  fail(`未知的翻译服务类型：${id}`);
 }
 
 export { ProviderError };
