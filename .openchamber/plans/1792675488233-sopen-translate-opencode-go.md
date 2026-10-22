@@ -53,7 +53,7 @@
 - [x] C4 设置页：术语表编辑 + 内置词库开关 + 三档说明 + 关于与许可
 - [x] C5 `THIRD-PARTY-NOTICES.md`
 - [ ] C6 验收 C：三套命令全绿 + 四个真机页面手工验收 + `build:glossary` 幂等（三套命令与 `build:glossary --check` 已通过；四个真机页面未跑，本机无已加载扩展的浏览器会话）
-- [ ] D1 收尾：`manifest.json` 版本 0.2.0，README / AGENTS.md / package.json 同步
+- [x] D1 收尾：`manifest.json` 版本 0.2.0，README / AGENTS.md / package.json 同步
 
 ---
 

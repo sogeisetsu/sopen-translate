@@ -1,12 +1,12 @@
 # AGENTS.md
 
-MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可加载产物：无构建、无运行时依赖、无 CI，测试只有一个 provider 冒烟脚本。
+MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可加载产物：无打包步骤、无运行时依赖、无 CI。测试是三个 Node 冒烟脚本（`check` / `smoke` / `smoke:dom`），另有一个离线的词库生成脚本（`build:glossary`）。
 
 ## 已拍板的决定（别推翻）
 
 - 只做整页翻译。划词翻译被用户明确否掉，别加回来。
 - 只支持 Chrome / Edge（MV3），不做 Firefox 兼容。
-- 不用 TypeScript 写源码，也不用打包工具。类型靠 JSDoc + `checkJs` 静态检查（`npm run check`），浏览器加载的仍是 `extension/` 里的原始 `.js`，不存在构建产物。`package.json` 里只有 `typescript`、`@types/chrome` 两个 devDependency。
+- 不用 TypeScript 写源码，也不用打包工具。类型靠 JSDoc + `checkJs` 静态检查（`npm run check`），浏览器加载的仍是 `extension/` 里的原始 `.js`。`package.json` 里只有 `typescript`、`@types/chrome` 两个 devDependency；`glossary-data.json` 是数据产物，不是打包产物。
 - 无后端：请求由 service worker 直接发往用户在设置页填的接口地址。
 
 ## 绝对禁止：仓库里不许出现任何隐私数据
@@ -23,30 +23,53 @@ MV3 浏览器扩展，整页翻译。源码目录 `extension/` 本身就是可�
 - `extension/content.js` 是 classic script，**不能写 `import`**。要共享代码就走 `chrome.runtime.sendMessage`，不要为了 import 引入打包步骤。
 - popup / options 是普通页面，可以直接 `import` `lib/*.js`。
 - 注入宿主页面的 UI 一律挂在 `#sopen-translate-ui` 下，只用 `content.css` 里的类名。该 overlay 是 `pointer-events: none`，别改成 `auto`，会挡住页面点击。
+- **`content.css` 唯一的作用域例外是 `.sopen-translated-block`**：双语模式的译文必须挂在宿主块元素里，不能塞进 `#sopen-translate-ui`；不要顺手把 toast 样式也放出去。
+- 双语模式把译文追加到块内末尾（`span` + `display:block`），**不用兄弟 `div`**：`td/th` 的兄弟 `div` 会破坏表格，`li` 之间插 `div` 不合法。
+
+## 不变量（改之前先读）
+
+- `background.js` 是唯一出网口、唯一读密钥的地方；content script 只发消息。
+- `translate()` / `translateBatch()` 必须原序返回与输入等长的数组，数量不符直接抛错——宁可失败，也不能把译文错位写回 DOM。
+- 每轮翻译前先 `resetPage()`：否则第二轮会把上一轮译文再翻一遍，且「还原」回不到原文。
+- 只有第 0 批失败才立即中止；其余批次计失败后继续，**连续 3 批失败熔断**，保留已翻部分。
+- 术语层只校验本批注入 prompt 的 ≤40 条（`termsForPrompt`），不要拿完整词表校验。
+- DeepL 完全跳过术语层（不注入、不校验、不回退）。
+- 语言只有 `lib/languages.js` 一个来源，popup 与设置页都从它读写。
+- `extension/lib/glossary-data.json` 只由 `npm run build:glossary` 生成，不手改；运行时不联网。
+- `models.list` 可以用草稿配置发请求，但只把缓存写回「已保存且配置一致」的 provider（`patchProvider`），不要用设置页 draft 覆盖存储。
+- 测试不 import `background.js`（service worker 依赖 `chrome.*`）；冒烟只碰 `lib/*.js` 与 `providers.js`。
 
 ## 加翻译服务
 
-往 `extension/lib/providers.js` 的 `PROVIDER_TYPES` 加一个 `{ type, label, hint, fields, translate }` 对象即可，设置页会按 `fields` 自动渲染表单。
+1. 预设：往 `extension/lib/provider-presets.js` 的 `PROVIDER_PRESETS` 加一条（`id/label/protocol/baseUrl/models/supportsModelList/verified`）；`{baseUrl}/models` 不是通用推导时补 `modelsUrl`。
+2. 协议：现有五种（`openai-chat` / `openai-responses` / `anthropic-messages` / `google-gemini` / `deepl`）覆盖绝大多数服务；真要加新协议，往 `extension/lib/protocols.js` 的 `PROTOCOLS` 加实现，并补 `types.d.ts` 的 `ProtocolId`。
 
-`translate()` 必须**原序返回与输入等长的数组**，数量不符直接抛错——宁可失败，也不能把译文错位写回 DOM。
+设置页按预设自动渲染卡片，不再依赖 `PROVIDER_TYPES` / `type.fields`（那两个只是旧调用方的兼容入口）。
 
-## 验证（没有自动化测试）
+## 验证
 
 - `npm run check` —— `tsc --noEmit`（`checkJs` 模式）。改完必须零错误，这是唯一能自动拦住契约漂移的手段。
 - `node --check extension/<file>.js` —— 单独确认某个文件语法（Node 22 自带语法检测，ESM 也能过）。
 - `Get-Content extension\manifest.json -Raw | ConvertFrom-Json` —— 验 manifest 结构合法。
-- provider 层冒烟测试：`npm run smoke`（`scripts/smoke.mjs`，stub `globalThis.fetch`，不联网）覆盖正常返回、代码块包裹、接口拒绝 `response_format` 时回退、分段数不符、无法解析、HTTP 错误、连接失败。改动 provider 后必须重跑。
-- content script 状态机冒烟测试：`npm run smoke:dom`（`scripts/dom-smoke.mjs`，用最小假 DOM 加载真实 `content.js`），覆盖"两轮翻译后还原回到原文"、翻译中拒绝还原、pre/过短文本跳过。改状态机后必须重跑。
+- provider 层冒烟测试：`npm run smoke`（`scripts/smoke.mjs`，stub `globalThis.fetch`，不联网）覆盖协议解析、`response_format` 收窄回退、429 退避、模型列表回退、术语三档、旧设置迁移。
+- content script 冒烟测试：`npm run smoke:dom`（`scripts/dom-smoke.mjs`，用最小假 DOM 加载真实 `content.js`）覆盖纯译文 / 双语 / 叶子容器 / 长块切分 / 还原 / 双轮 / 模式互切 / 熔断 / 进度。
+- 词库：`npm run build:glossary` 生成；`npm run build:glossary -- --check` 校验入库文件与源一致。改 allowlist / snapshot / blocklist 后必须重跑两者。
 - 真机只能手工：`chrome://extensions` 加载 `extension/` 目录。**没有真实密钥就没法验证端到端**，别声称跑通了。
 
 ## 容易踩的点
 
 - 别给 `#sopen-translate-ui` 加 inline `all: initial`：会重置 `position` / `pointer-events`，反过来覆盖样式表。
 - 整页翻译按 1200 字符 / 20 段分批串行发送；**只有第 0 批失败才中止**（别改回"看 originals 是否为空"，那个判断会被上一轮的残留污染）。
-- 每轮翻译开始前必须先还原上一轮的改动（`originals` 复位）：否则第二轮会把译文再翻一遍，且「还原」回不到原文。
+- 每轮翻译开始前必须先还原上一轮的改动（`resetPage()`）：否则第二轮会把译文再翻一遍，且「还原」回不到原文。
+- `response_format` 回退只在 400/404/422 触发；401/403/429 直接上抛，否则一次 429 会变成 4+4 次请求。
+- OpenCode Go 必须发 `x-opencode-session`（`getSessionId()` 生成的 UUID），漏发就是全网 400。`User-Agent` 只作 best-effort，别把成功建立在它上面。
+- 双语模式跳过含 `PRE/CODE/...` 后代的块（含内联 `<code>` 的段落也跳过），这是有意的覆盖率损失，换"不把代码翻坏"。
+- 长块按句切到 ≤1200 字符再分别送翻；拼回时 CJK 句末不加空格，拉丁句末加空格。跨句上下文会丢一点，是已知限制。
 - `host_permissions: <all_urls>` 和 content script 的 `<all_urls>` 是必要的——接口地址由用户自己填，别收窄成固定域名。
 - 只在顶层 frame 生效（`all_frames: false`），是有意为之。
 - 类型声明集中在仓库根的 `types.d.ts`，JSDoc 里用 `import('../../types')` 引用；它不会被扩展加载，别挪进 `extension/`。
 - `tsconfig.json` 里 `noImplicitAny: false` 是故意的：未注解的参数太多，开了只会刷屏。真正起作用的是 `strictNullChecks` 和 provider 契约检查，别顺手打开。
+- 术语层出问题时先关掉设置页的「使用内置词库」复现，再判断是渲染、prompt 还是校验的问题。
+- `scripts/build-glossary-snapshot.mjs` 是维护者手动跑的联网脚本，不参与 `build:glossary`；日常构建必须保持离线。
 
 行为变化时同步更新 `README.md`，它同时是对外说明。

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "sopen-translate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "轻量网页整页翻译：翻译服务和 API 密钥由你自己配置。",
   "permissions": ["storage"],
   "host_permissions": ["<all_urls>"],
