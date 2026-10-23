@@ -1,5 +1,5 @@
 /**
- * 从模型返回里抠出分段数组，兼容代码块包裹和多余前后缀。
+ * 从模型返回里抠出 JSON 值 / 分段数组，兼容代码块包裹和多余前后缀。
  *
  * 约定：`null` / `undefined` 段映射成空字符串（表示模型拒绝该段），
  * 解析失败直接抛 `ProviderError`——宁可整批失败，也不要把空串错位写回页面。
@@ -8,10 +8,11 @@
 import { clip, fail } from './http.js';
 
 /**
+ * 从模型返回里抠出 JSON 值，兼容代码块包裹和多余前后缀。
  * @param {unknown} content
- * @returns {string[]}
+ * @returns {any}
  */
-export function parseSegments(content) {
+export function parseJsonPayload(content) {
   const text = typeof content === 'string' ? content : content == null ? '' : String(content);
   if (!text) fail('模型返回为空');
 
@@ -26,12 +27,23 @@ export function parseSegments(content) {
 
   for (const candidate of candidates) {
     try {
-      const data = JSON.parse(candidate.trim());
-      const arr = Array.isArray(data) ? data : data?.segments;
-      if (Array.isArray(arr)) return arr.map((item) => (item == null ? '' : String(item)));
+      return JSON.parse(candidate.trim());
     } catch {
       /* 换下一个候选 */
     }
   }
   fail(`无法解析模型返回：${clip(text)}`);
+}
+
+/**
+ * 从模型返回里抠出分段数组。
+ * 约定：`null` / `undefined` 段映射成空字符串（表示模型拒绝该段）。
+ * @param {unknown} content
+ * @returns {string[]}
+ */
+export function parseSegments(content) {
+  const data = parseJsonPayload(content);
+  const arr = Array.isArray(data) ? data : data?.segments;
+  if (Array.isArray(arr)) return arr.map((item) => (item == null ? '' : String(item)));
+  fail('无法解析模型返回：缺少 segments 数组');
 }

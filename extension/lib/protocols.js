@@ -76,10 +76,16 @@ function isJsonModeRejection(err) {
 
 /* ------------------------------ openai-chat ------------------------------ */
 
+/** @param {any} json @returns {string} */
+function openaiChatContent(json) {
+  return String(json?.choices?.[0]?.message?.content ?? '');
+}
+
 /** @type {Protocol} */
 const openaiChat = {
   id: 'openai-chat',
   label: 'OpenAI Chat Completions',
+  supportsGlossary: true,
   buildRequest(args) {
     const url = joinUrl(args.config.baseUrl, '/chat/completions');
     const headers = llmHeaders(args);
@@ -99,10 +105,11 @@ const openaiChat = {
     }
     return { url, headers, body };
   },
+  extractContent: openaiChatContent,
   parseResponse(json) {
-    return parseSegments(json?.choices?.[0]?.message?.content);
+    return parseSegments(openaiChatContent(json));
   },
-  async translate(args) {
+  async requestContent(args) {
     const request = openaiChat.buildRequest(args);
     const body = /** @type {Record<string, any>} */ (request.body);
     const retryDelays = args.retry?.delays;
@@ -117,7 +124,7 @@ const openaiChat = {
         body: { ...body, response_format: { type: 'json_object' } },
         retryDelays,
       });
-      return openaiChat.parseResponse(data);
+      return openaiChatContent(data);
     } catch (err) {
       if (!isJsonModeRejection(err)) throw err;
 
@@ -132,7 +139,7 @@ const openaiChat = {
             body: { ...withoutReasoning, response_format: { type: 'json_object' } },
             retryDelays,
           });
-          return openaiChat.parseResponse(data);
+          return openaiChatContent(data);
         } catch (err2) {
           if (!isJsonModeRejection(err2)) throw err2;
           const data = await postJson(request.url, {
@@ -140,7 +147,7 @@ const openaiChat = {
             body: withoutReasoning,
             retryDelays,
           });
-          return openaiChat.parseResponse(data);
+          return openaiChatContent(data);
         }
       }
 
@@ -150,17 +157,30 @@ const openaiChat = {
         body,
         retryDelays,
       });
-      return openaiChat.parseResponse(data);
+      return openaiChatContent(data);
     }
+  },
+  async translate(args) {
+    return parseSegments((await openaiChat.requestContent?.(args)) ?? '');
   },
 };
 
 /* ---------------------------- openai-responses ---------------------------- */
 
+/** @param {any} json @returns {string} */
+function openaiResponsesContent(json) {
+  const output = Array.isArray(json?.output) ? json.output : [];
+  return output
+    .flatMap((/** @type {any} */ item) => (Array.isArray(item?.content) ? item.content : []))
+    .map((/** @type {any} */ part) => String(part?.text ?? ''))
+    .join('');
+}
+
 /** @type {Protocol} */
 const openaiResponses = {
   id: 'openai-responses',
   label: 'OpenAI Responses',
+  supportsGlossary: true,
   buildRequest(args) {
     const url = joinUrl(args.config.baseUrl, '/responses');
     const body = {
@@ -173,31 +193,37 @@ const openaiResponses = {
     };
     return { url, headers: llmHeaders(args), body };
   },
+  extractContent: openaiResponsesContent,
   parseResponse(json) {
-    const output = Array.isArray(json?.output) ? json.output : [];
-    const text = output
-      .flatMap((/** @type {any} */ item) => (Array.isArray(item?.content) ? item.content : []))
-      .map((/** @type {any} */ part) => String(part?.text ?? ''))
-      .join('');
-    return parseSegments(text);
+    return parseSegments(openaiResponsesContent(json));
   },
-  async translate(args) {
+  async requestContent(args) {
     const request = openaiResponses.buildRequest(args);
     const data = await postJson(request.url, {
       headers: request.headers,
       body: request.body,
       retryDelays: args.retry?.delays,
     });
-    return openaiResponses.parseResponse(data);
+    return openaiResponsesContent(data);
+  },
+  async translate(args) {
+    return parseSegments((await openaiResponses.requestContent?.(args)) ?? '');
   },
 };
 
 /* --------------------------- anthropic-messages --------------------------- */
 
+/** @param {any} json @returns {string} */
+function anthropicContent(json) {
+  const content = Array.isArray(json?.content) ? json.content : [];
+  return content.map((/** @type {any} */ part) => String(part?.text ?? '')).join('');
+}
+
 /** @type {Protocol} */
 const anthropicMessages = {
   id: 'anthropic-messages',
   label: 'Anthropic Messages',
+  supportsGlossary: true,
   buildRequest(args) {
     const url = joinUrl(args.config.baseUrl, '/messages');
     /** @type {Record<string, string>} */
@@ -213,27 +239,39 @@ const anthropicMessages = {
     };
     return { url, headers, body };
   },
+  extractContent: anthropicContent,
   parseResponse(json) {
-    const content = Array.isArray(json?.content) ? json.content : [];
-    return parseSegments(content.map((/** @type {any} */ part) => String(part?.text ?? '')).join(''));
+    return parseSegments(anthropicContent(json));
   },
-  async translate(args) {
+  async requestContent(args) {
     const request = anthropicMessages.buildRequest(args);
     const data = await postJson(request.url, {
       headers: request.headers,
       body: request.body,
       retryDelays: args.retry?.delays,
     });
-    return anthropicMessages.parseResponse(data);
+    return anthropicContent(data);
+  },
+  async translate(args) {
+    return parseSegments((await anthropicMessages.requestContent?.(args)) ?? '');
   },
 };
 
 /* ----------------------------- google-gemini ----------------------------- */
 
+/** @param {any} json @returns {string} */
+function googleGeminiContent(json) {
+  const parts = json?.candidates?.[0]?.content?.parts;
+  return Array.isArray(parts)
+    ? parts.map((/** @type {any} */ part) => String(part?.text ?? '')).join('')
+    : '';
+}
+
 /** @type {Protocol} */
 const googleGemini = {
   id: 'google-gemini',
   label: 'Google Gemini',
+  supportsGlossary: true,
   buildRequest(args) {
     const model = String(args.config.model ?? '').trim();
     const base = joinUrl(args.config.baseUrl, `/models/${encodeURIComponent(model)}:generateContent`);
@@ -246,21 +284,21 @@ const googleGemini = {
     };
     return { url, headers: jsonHeaders(args.extraHeaders), body };
   },
+  extractContent: googleGeminiContent,
   parseResponse(json) {
-    const parts = json?.candidates?.[0]?.content?.parts;
-    const text = Array.isArray(parts)
-      ? parts.map((/** @type {any} */ part) => String(part?.text ?? '')).join('')
-      : '';
-    return parseSegments(text);
+    return parseSegments(googleGeminiContent(json));
   },
-  async translate(args) {
+  async requestContent(args) {
     const request = googleGemini.buildRequest(args);
     const data = await postJson(request.url, {
       headers: request.headers,
       body: request.body,
       retryDelays: args.retry?.delays,
     });
-    return googleGemini.parseResponse(data);
+    return googleGeminiContent(data);
+  },
+  async translate(args) {
+    return parseSegments((await googleGemini.requestContent?.(args)) ?? '');
   },
 };
 

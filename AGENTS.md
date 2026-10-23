@@ -49,9 +49,10 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 术语只校验本批注入 prompt 的 ≤40 条（`termsForPrompt`），不要拿完整词表校验。
 - DeepL、微软 MT（`microsoft-edge` / `microsoft-azure`）与 Google 免费接口完全跳过术语层（不注入、不校验、不回退）。
 - 语言只有 `lib/languages.js` 一个来源（LLM 用 `name`，DeepL 用 `code`，微软用 `ms`，Google 免费接口用 `google`）。
-- 审校层只处理规则筛出的可疑段：`lib/review.js` 是纯函数，`providers.js` 的 `reviewTranslations()` 负责发一次 LLM 请求。审校失败/数量不符/校验不过一律保留主译文，不整段回退；审校服务必须是 LLM（`supportsGlossary !== false`）。
+- 审校层只处理规则筛出的可疑段：`lib/review.js` 是纯函数，`providers.js` 的 `reviewTranslations()` 负责发一次 LLM 请求。审校失败/解析失败/校验不过一律保留主译文，不整段回退；审校服务必须是 LLM（`supportsGlossary !== false`）。
 - 审校预算按 content 传来的 `pageToken` 在 background 累计（每页 200 段 / 8,000 字符）；滚动续翻共用 token，还原/重新翻译换新 token。不要改成按单批计算。
-- 修正按顺序对齐回可疑段，不依赖模型返回的 `index`。
+- 审校响应只接受 `{ segments: [{ index, corrected }] }`：index 必须属于送审集合、corrected 非空；越界 / 重复 / 非整数 / 空值条目直接丢弃。解析失败算审校失败，不整段回退。
+- 修正按模型返回的 `index` 对齐，不再依赖顺序；不要改成按数组位置写回。
 - `glossary-data.json` 只由 `npm run build:glossary` 生成，不手改，运行时不联网。
 - `models.list` 可以用草稿配置发请求，但只通过 `patchProvider` 把缓存写回「已保存且配置一致」的 provider。
 - 设置 schema 是 v2；迁移幂等（`ZH → ZH-HANS`）；`getSessionId()` 单独写入，不要塞进 `getSettings()`。
