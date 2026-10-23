@@ -1633,6 +1633,54 @@ await test('chrome-builtin：语言码映射与扩展外错误', async () => {
   );
 });
 
+await test('google-pa（Google 2）：批量 body / X-Goog-API-Key / 1:1 解析', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), body: JSON.parse(init.body), headers: init.headers });
+    return new Response(
+      JSON.stringify([
+        ['DeepSeek V4.1 Flash 是一种编码模型。', 'Kubernetes 在 3 个节点上运行容器。'],
+        ['en', 'en'],
+      ]),
+      { status: 200, headers: { 'Content-Type': 'application/json+protobuf' } },
+    );
+  };
+
+  const config = {
+    id: 'g2',
+    presetId: 'google-pa',
+    protocol: 'google-pa',
+    baseUrl: 'https://translate-pa.googleapis.com',
+    apiKey: 'test-key',
+  };
+  const texts = ['DeepSeek V4.1 Flash is a coding model.', 'Kubernetes runs containers on 3 nodes.'];
+  const out = await getProviderType('google-pa').translate({
+    texts,
+    config,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+  });
+
+  assert.deepEqual(out, ['DeepSeek V4.1 Flash 是一种编码模型。', 'Kubernetes 在 3 个节点上运行容器。']);
+  assert.equal(calls.length, 1, 'Google 2 一批一次请求');
+  assert.equal(calls[0].url, 'https://translate-pa.googleapis.com/v1/translateHtml');
+  assert.equal(calls[0].headers['X-Goog-API-Key'], 'test-key');
+  assert.equal(calls[0].headers['Content-Type'], 'application/json+protobuf');
+  assert.deepEqual(calls[0].body, [[texts, 'auto', 'zh-CN'], 'wt_lib']);
+
+  await assert.rejects(
+    () =>
+      getProviderType('google-pa').translate({
+        texts: ['Hello'],
+        config: { ...config, apiKey: '' },
+        target: '简体中文',
+        targetCode: 'ZH-HANS',
+      }),
+    /X-Goog-API-Key/,
+  );
+});
+
 if (failures > 0) {
   console.log(`\n${failures} 个用例失败`);
   process.exit(1);

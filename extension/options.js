@@ -262,6 +262,7 @@ const MT_PROTOCOLS = new Set([
   'microsoft-edge',
   'microsoft-azure',
   'google-free',
+  'google-pa',
   'nvidia-riva',
   'chrome-builtin',
 ]);
@@ -299,6 +300,11 @@ function missingRequired(provider) {
   if (provider.protocol === 'microsoft-edge' || provider.protocol === 'google-free') return missing;
 
   if (provider.protocol === 'nvidia-riva') {
+    if (!String(provider.apiKey ?? '').trim()) missing.push('API Key');
+    return missing;
+  }
+
+  if (provider.protocol === 'google-pa') {
     if (!String(provider.apiKey ?? '').trim()) missing.push('API Key');
     return missing;
   }
@@ -655,6 +661,8 @@ function providerCard(provider, index) {
   const isAzure = provider.protocol === 'microsoft-azure';
   const isRiva = provider.presetId === 'nvidia-riva';
   const isBuiltin = provider.protocol === 'chrome-builtin';
+  const isGooglePa = provider.protocol === 'google-pa';
+  const isGoogleFree = provider.protocol === 'google-free';
   const hideKey = isEdge || provider.protocol === 'google-free' || isBuiltin;
   const active = getDraft().activeProviderId === provider.id;
   const displayName = provider.label || preset.label;
@@ -848,6 +856,18 @@ function providerCard(provider, index) {
         text: '端侧模型：页面文本不出本机。首次使用某个语言对时，先点「准备语言包」完成一次下载。',
       })
     : null;
+  const googlePaNote = isGooglePa
+    ? h('p', {
+        class: 'provider-note',
+        text: 'Google 2 走 translate-pa 批量接口，需要你自己的 X-Goog-API-Key；Google 1 是无需 key 的单条网页接口，容易被 429。',
+      })
+    : null;
+  const googleFreeNote = isGoogleFree
+    ? h('p', {
+        class: 'provider-note',
+        text: 'Google 1 是无需 key 的单条网页接口，一次一个 q，容易被 429；需要稳定批量请改用 Google 2（translate-pa）。',
+      })
+    : null;
 
   return h(
     'div',
@@ -856,6 +876,8 @@ function providerCard(provider, index) {
     fields.length ? h('div', { class: 'grid' }, ...fields) : null,
     rivaNote,
     builtinNote,
+    googlePaNote,
+    googleFreeNote,
     advanced,
     actions,
     preset.hint ? h('p', { class: 'provider-hint', text: preset.hint }) : null,

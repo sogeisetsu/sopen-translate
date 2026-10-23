@@ -468,6 +468,50 @@ const chromeBuiltin = {
   },
 };
 
+/* ---------------------------- Google 2（translate-pa） ---------------------------- */
+
+/**
+ * Google 2：translate-pa 的批量接口。与 Google 1 的区别是 POST + 批量数组，
+ * 必须带 `X-Goog-API-Key`；响应是 `[[translated...], [lang...]]`。
+ * @type {Protocol}
+ */
+const googlePa = {
+  id: 'google-pa',
+  label: 'Google 2（translate-pa）',
+  supportsGlossary: false,
+  buildRequest(args) {
+    const key = String(args.config.apiKey ?? '').trim();
+    if (!key) fail('Google 2 需要 X-Goog-API-Key：请在设置页填 API Key');
+    const source = args.config.sourceLang
+      ? googleCode(args.config.sourceLang)
+      : 'auto';
+    const target = googleCode(args.targetCode || args.target);
+    return {
+      url: joinUrl(args.config.baseUrl || 'https://translate-pa.googleapis.com', '/v1/translateHtml'),
+      headers: {
+        'Content-Type': 'application/json+protobuf',
+        'X-Goog-API-Key': key,
+      },
+      body: [[args.texts, source, target], 'wt_lib'],
+    };
+  },
+  parseResponse(json) {
+    const list = Array.isArray(json) ? json[0] : null;
+    if (!Array.isArray(list)) fail(`响应缺少 translations：${clip(JSON.stringify(json))}`);
+    return list.map((/** @type {any} */ item) => String(item ?? ''));
+  },
+  async translate(args) {
+    const request = googlePa.buildRequest(args);
+    const data = await postJson(request.url, {
+      headers: request.headers,
+      body: request.body,
+      timeoutMs: 30000,
+      retryDelays: args.retry?.delays,
+    });
+    return googlePa.parseResponse(data);
+  },
+};
+
 /* ---------------------------- Google 免费接口 ---------------------------- */
 
 /** 非官方网页接口一次只接受一个 q；超过这个长度就按句切开串行请求 */
@@ -621,6 +665,7 @@ export const PROTOCOLS = {
   'microsoft-edge': microsoftEdge,
   'microsoft-azure': microsoftAzure,
   'google-free': googleFree,
+  'google-pa': googlePa,
   'nvidia-riva': nvidiaRiva,
   'chrome-builtin': chromeBuiltin,
   deepl,

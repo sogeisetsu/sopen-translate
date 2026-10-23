@@ -14,6 +14,8 @@ export type ProtocolId =
   | 'microsoft-edge'
   | 'microsoft-azure'
   | 'google-free'
+  /** Google 2（translate-pa）：POST /v1/translateHtml + X-Goog-API-Key */
+  | 'google-pa'
   /** NVIDIA Riva Translate：专用 MT，system 只发语言对标签 */
   | 'nvidia-riva'
   /** Chrome / Chromium 端侧内置翻译（Translator API，经 offscreen 文档调用） */

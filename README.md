@@ -5,7 +5,7 @@
 - **视口优先**：首屏先出译文，滚动、窗口变化、SPA 新内容自动补翻；也能切「整页」一次翻完
 - **术语保护**：品牌 / 型号 / 协议名保持原文，内置词库 + 自定义词表 + 三档漏词策略
 - **纯译文 / 双语**：随时还原，双语只往块内末尾追加 `span`，不破坏表格与列表
-- **19 个内置服务预设**：LLM、DeepL、微软、Google 免费接口、NVIDIA Riva、Chrome 端侧翻译，全部可自定义
+- **20 个内置服务预设**：LLM、DeepL、微软、Google 1 / Google 2、NVIDIA Riva、Chrome 端侧翻译，全部可自定义
 - **可选异步审校**：主译文先渲染，规则筛出的可疑段随后交给第二个 LLM 修正，可查看 diff、可撤销
 - **无后端、无打包、无运行时依赖**：`extension/` 目录就是可加载产物
 
@@ -55,7 +55,7 @@
   - `repair`：只重翻漏词段，仍漏才保留原文（默认）；
   - `warn`：译文照常显示，只提示可能漏词。
 - 每批最多把 40 条命中术语注入 prompt，校验也只针对这 40 条。
-- **DeepL、微软翻译、Google 免费接口、NVIDIA Riva、Chrome 内置翻译没有 prompt 通道**：扩展对它们完全跳过术语层，不注入、不校验、不回退。
+- **DeepL、微软翻译、Google 1 / Google 2、NVIDIA Riva、Chrome 内置翻译没有 prompt 通道**：扩展对它们完全跳过术语层，不注入、不校验、不回退。
 
 ### 审校（可选，默认关闭）
 
@@ -90,7 +90,7 @@
 
 ## 翻译服务与协议
 
-内置 **19 个预设**，另可添加「自定义」（10 种协议任选）。设置页会标注「已验证 / 接口未实测」。
+内置 **20 个预设**，另可添加「自定义」（11 种协议任选）。设置页会标注「已验证 / 接口未实测」。
 
 | 预设 | 协议 | 验证状态 |
 | --- | --- | --- |
@@ -101,13 +101,14 @@
 | Chrome 内置翻译（端侧） | chrome-builtin | 接口未实测（需真机下载语言包；桌面版 Chrome/Chromium） |
 | NVIDIA NIM · MiniMax M3.1 Flash | OpenAI Chat | 已实测（`{segments}` + `reasoning_effort=none`） |
 | NVIDIA Riva Translate | nvidia-riva | 已实测（语言对 system；1 段/请求） |
-| Google 免费网页接口 | Google 免费 | 接口未实测（非官方；本机出口实测可达但返回 429） |
+| Google 1（网页接口） | google-free | 接口未实测（无需 key；单条请求，本机出口常 429） |
+| Google 2（translate-pa） | google-pa | 已实测（批量 POST；需要你自己的 `X-Goog-API-Key`） |
 | Microsoft Azure Translator | Microsoft Azure | 接口未实测（需要 key + Region） |
 | Index-Translate（本地代理） | OpenAI Chat | 接口未实测（需要本地代理） |
 | OpenAI / DeepSeek / Kimi / 智谱 / 阿里百炼 / MiniMax / OpenRouter / 硅基流动 | OpenAI Chat | 接口未实测 |
-| 自定义 | 10 种协议任选 | 取决于你填的地址 |
+| 自定义 | 11 种协议任选 | 取决于你填的地址 |
 
-协议清单：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`microsoft-edge`、`microsoft-azure`、`google-free`、`deepl`、`nvidia-riva`、`chrome-builtin`。
+协议清单：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`microsoft-edge`、`microsoft-azure`、`google-free`、`google-pa`、`deepl`、`nvidia-riva`、`chrome-builtin`。
 
 ### NVIDIA 两个预设
 
@@ -122,8 +123,27 @@
 - 首次使用某个语言对时，先在服务卡片点「准备语言包」下载一次；之后直接翻译。语言对由 `builtinLang()` 映射（`ZH-HANS → zh`、`ZH-HANT → zh-Hant`）。
 - Translator API 只在 window 上下文可用，所以扩展用 `offscreen.html` 承载；manifest 里的 `offscreen` 权限只服务这一项。
 - 仅桌面版 Chrome/Chromium 支持；语言包没下载时会提示去设置页准备；不支持的语言对会直接报错。
-- 它和 Chrome 浏览器里“翻译此页”用的云端服务不是同一条路径；想走 Google 的云翻译请用「Google 免费网页接口」。
+- 它和 Chrome 浏览器里“翻译此页”用的云端服务不是同一条路径；想走 Google 的云翻译请用「Google 1」或「Google 2」。
 - 端侧模型逐段处理，扩展按 2000 字符 / 20 段 / 单路分批，避免一次塞太多。
+
+### Google 1 与 Google 2
+
+这两个预设都接 Google 翻译，但用的是不同的网页接口，不要混为一谈：
+
+| | Google 1（网页接口） | Google 2（translate-pa） |
+| --- | --- | --- |
+| 请求 | `GET https://translate.googleapis.com/translate_a/single?client=gtx&dj=1...` | `POST https://translate-pa.googleapis.com/v1/translateHtml` |
+| 批量 | 一次一个 `q`，长文本要切开串行 | 一次可发多段 |
+| 鉴权 | 不需要 key | 需要 `X-Goog-API-Key` |
+| 请求体 | query 参数 | `[[texts, "auto", "zh-CN"], "wt_lib"]` |
+| 响应 | `sentences[].trans` | `[[translations...], [langs...]]` |
+| 稳定性 | 非官方，本机出口实测常返回 429 | 批量接口，实测更稳 |
+| 适用 | 快速试一下、没有 key | 需要稳定批量翻译，且有 Google API key |
+
+- 两个预设都跳过术语层（MT 没有 prompt 通道）。
+- **Google 2 的 key 要你自己填**：扩展不内置第三方公共 key，避免把别人的凭据写进仓库；KISS Translator 等项目的公共 key 可以自行决定是否使用。
+- Google 2 的协议名是 `google-pa`，预设页会显示请求地址与 `X-Goog-API-Key` 说明；Google 1 的协议名是 `google-free`。
+- 两者都会把页面文本发给 Google；不需要联网的端侧方案是「Chrome 内置翻译」。
 
 ### 微软翻译
 
@@ -141,7 +161,7 @@
 
 ```mermaid
 flowchart LR
-  subgraph MT["MT：微软 / DeepL / Google / Riva / Chrome 内置"]
+  subgraph MT["MT：微软 / DeepL / Google 1·2 / Riva / Chrome 内置"]
     direction TB
     mt1["收集 / 分批"] --> mt2["术语注入：跳过<br/>无 prompt 通道"]
     mt2 --> mt3["主翻译"]
@@ -195,7 +215,7 @@ flowchart LR
   - LLM 预设：文本 + prompt 发给对应 API；
   - DeepL / Azure / NVIDIA：发给对应厂商；
   - Edge 翻译：发给微软的内部接口；
-  - Google 免费接口：发给 Google 的非官方网页接口；
+  - Google 1 / Google 2：发给 Google 的网页翻译接口（Google 2 需要你的 API key）；
   - Chrome 内置翻译：端侧模型在本机运行，页面文本不发出去。
 - **审校**：配置后，可疑段还会发给所选的审校服务（多一个数据流向）；只送规则筛出的段，不送整页。
 - **调试日志**：只写本机存储；不自动上传、不联网；导出文件已脱敏，默认不含页面正文。
@@ -220,8 +240,11 @@ flowchart LR
 **Chrome 内置翻译提示语言包未下载**
 ：到设置页该服务卡片点「准备语言包」，等下载完成再翻译；仅桌面版 Chrome/Chromium 支持，语言对不支持时会直接报错。
 
-**Google 免费接口 429**
-：非官方接口，出口 IP 被限流；换网络/代理，或改用 DeepL / 微软 / 自建服务。
+**Google 1 返回 429**
+：非官方网页接口，出口 IP 被限流；换网络/代理，或改用 Google 2 / DeepL / 微软 / 自建服务。
+
+**Google 2 提示缺少 X-Goog-API-Key**
+：Google 2 需要你自己的 Google API key；到 Google Cloud 控制台启用 Translation 相关 API 后，把 key 填进服务卡片。扩展不内置第三方 key。
 
 **审校没有反应**
 ：审校只对 MT 主翻译生效；LLM 主翻译会直接返回 `reviewSkipped = "llm-primary"`。另外没有可疑段时不会发请求。
@@ -247,7 +270,7 @@ npm run build:glossary -- --check  # 校验入库词库与源文件一致
 
 ## 状态
 
-`0.2.0`。已实现：视口优先与整页、纯译文与双语、还原、术语三档、10 种协议、19 个预设、模型刷新、异步审校 + diff/撤销、NVIDIA Riva / MiniMax、Chrome 端侧内置翻译、明暗主题与 ⓘ 信息提示、本地调试日志。
+`0.2.0`。已实现：视口优先与整页、纯译文与双语、还原、术语三档、11 种协议、20 个预设、模型刷新、异步审校 + diff/撤销、NVIDIA Riva / MiniMax、Chrome 端侧内置翻译、Google 1 / Google 2、明暗主题与 ⓘ 信息提示、本地调试日志。
 
 尚未实现：划词 / 右键翻译、翻译缓存、快捷键、按站点开关、用量统计、术语指定译法、审校全量评分、NVIDIA 其他模型、G2 Translator API。
 
@@ -257,7 +280,7 @@ npm run build:glossary -- --check  # 校验入库词库与源文件一致
 - 双语模式跳过含代码的块；SPA 页面建议等渲染完成再点翻译。
 - 长块按句切分会丢一点跨句上下文；单句超 1200 字符硬切。
 - 无限滚动页面会持续产生补翻任务，靠熔断与隐藏暂停兜底。
-- 19 个预设中只有 OpenCode Go / 商汤 / DeepL / Edge / NVIDIA 两个预设做过真 key 端到端；Chrome 内置翻译完成了架构验证但未在真机下载语言包；其余为路由级或 stub 验证，baseUrl / 模型名可能过期。
+- 20 个预设中只有 OpenCode Go / 商汤 / DeepL / Edge / NVIDIA 两个 / Google 2 做过真 key 端到端；Chrome 内置翻译完成了架构验证但未在真机下载语言包；其余为路由级或 stub 验证，baseUrl / 模型名可能过期。
 - 审校只修规则看得见的硬伤，不承诺语义润色；配置后页面文本会多一个数据流向。
 
 ## 许可

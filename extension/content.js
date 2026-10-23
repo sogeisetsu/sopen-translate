@@ -243,6 +243,9 @@
       } else if (active?.protocol === 'chrome-builtin') {
         // 端侧 Translator API 顺序处理；小批 + 单路，避免一次塞太多文本
         policy = { chars: 2000, items: 20, concurrency: 1 };
+      } else if (active?.protocol === 'google-pa') {
+        // Google 2 支持批量 POST；保守 3000 字符 / 50 段 / 2 路
+        policy = { chars: 3000, items: 50, concurrency: 2 };
       } else if (active?.protocol === 'nvidia-riva') {
         // Riva 是专用翻译模型：协议内部一段一请求，外面用 2 路并发即可
         policy = { chars: 3000, items: 10, concurrency: 2 };
