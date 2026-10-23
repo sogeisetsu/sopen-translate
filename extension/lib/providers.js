@@ -352,7 +352,7 @@ export const PROVIDER_TYPES = [legacyOpenai, legacyDeepl];
 export function getProviderType(id) {
   const legacy = PROVIDER_TYPES.find((provider) => provider.type === id);
   if (legacy) return legacy;
-  if (PROTOCOLS[id]) return getProtocol(id);
+  if (Object.hasOwn(PROTOCOLS, id)) return getProtocol(id);
   fail(`未知的翻译服务类型：${id}`);
 }
 
