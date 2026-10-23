@@ -793,7 +793,7 @@
 
   /**
    * @param {string} prefix
-   * @param {{ failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean } }} summary
+   * @param {{ failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean, truncated?: boolean } }} summary
    */
   function summaryText(prefix, { failed, protected: protectedCount, warnings, stopped, review }) {
     const parts = [prefix];
@@ -804,7 +804,9 @@
       parts.push(
         review.failed
           ? `审校失败，保留原译文`
-          : `已审校 ${review.reviewed} 段，修正 ${review.corrected} 段`,
+          : `已审校 ${review.reviewed} 段，修正 ${review.corrected} 段${
+              review.truncated ? '（预算已满）' : ''
+            }`,
       );
     }
     if (stopped) parts.push('连续失败，已停止');
