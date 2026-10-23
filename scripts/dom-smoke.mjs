@@ -691,7 +691,7 @@ await test('失败补跑：失败批串行重试一次后补齐', async () => {
 
 await test('熔断：连续 3 批失败后停止，保留已翻部分', async () => {
   await resetPageStub();
-  // 每段约 48 字符、每批 50 段 → 240 段 = 5 批；并发 4 会先起飞前 4 批
+  // 视口策略每批 ≤2000 字符 / 60 段；每段约 48 字符 → 240 段约 6 批，并发 4 会先起飞前 4 批
   const filler = 'x'.repeat(39);
   const paragraphs = Array.from({ length: 240 }, (_, i) =>
     el('p', `word${String(i).padStart(3, '0')} ${filler}`),
@@ -713,12 +713,12 @@ await test('熔断：连续 3 批失败后停止，保留已翻部分', async ()
   const result = await send({ type: 'page.translate' });
   assert.equal(result.ok, true, result.error);
   assert.equal(result.stopped, true);
-  assert.ok(result.translated >= 50, `第一批的 50 段应当保留，实际 ${result.translated}`);
-  assert.ok(result.failed >= 150, `至少 3 批失败，实际 ${result.failed}`);
+  assert.ok(result.translated >= 40, `第一批应当保留，实际 ${result.translated}`);
+  assert.ok(result.failed >= 100, `至少 3 批失败，实际 ${result.failed}`);
   // 并发下已经在飞的批次无法取消，允许比阈值多带最多 CONCURRENCY-1 批
-  assert.ok(calls <= 5, `熔断后不应继续调度，实际 ${calls} 次`);
+  assert.ok(calls <= 6, `熔断后不应继续调度，实际 ${calls} 次`);
   assert.equal(paragraphs[0].textContent.startsWith('中:'), true);
-  assert.equal(paragraphs[50].textContent.startsWith('word050'), true, '失败批次保持原文');
+  assert.equal(paragraphs[100].textContent.startsWith('word100'), true, '失败批次保持原文');
 });
 
 await test('进度：翻译中 total > 0，结束后 done === total', async () => {
