@@ -15,7 +15,7 @@
  */
 
 import { ProviderError, fail } from './http.js';
-import { getProtocol } from './protocols.js';
+import { PROTOCOLS, getProtocol } from './protocols.js';
 import { compileGlossary, matchTerms, promptTerms, verifySegment } from './glossary.js';
 import { applyReviewCorrections, buildReviewRequest, findSuspicious } from './review.js';
 
@@ -333,9 +333,7 @@ export const PROVIDER_TYPES = [legacyOpenai, legacyDeepl];
 export function getProviderType(id) {
   const legacy = PROVIDER_TYPES.find((provider) => provider.type === id);
   if (legacy) return legacy;
-  if (id === 'openai-chat' || id === 'openai-responses' || id === 'anthropic-messages' || id === 'google-gemini' || id === 'deepl') {
-    return getProtocol(id);
-  }
+  if (PROTOCOLS[id]) return getProtocol(id);
   fail(`未知的翻译服务类型：${id}`);
 }
 

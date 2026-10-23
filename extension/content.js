@@ -154,7 +154,10 @@
     try {
       const status = await chrome.runtime.sendMessage({ type: 'status' });
       const active = status?.active;
-      if (active?.protocol === 'deepl') {
+      if (active?.protocol === 'google-free') {
+        // 非官方接口一次只能一个 q：小批 + 串行，别一次打太多
+        policy = { chars: 1500, items: 10, concurrency: 1 };
+      } else if (active?.protocol === 'deepl') {
         policy = { chars: 3000, items: 50, concurrency: 4 };
       } else if (active?.protocol === 'microsoft-edge' || active?.protocol === 'microsoft-azure') {
         policy = { chars: 5000, items: 100, concurrency: 4 };

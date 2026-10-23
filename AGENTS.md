@@ -58,7 +58,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 ## 分批、并发、思考（2026-10 实测）
 
-- 按 provider 策略：LLM 8000 字符 / 400 段 / 8 路；DeepL 3000 / 50 / 4（50 是 DeepL 单请求上限）；商汤 6000 / 300 / 1；微软 MT 5000 / 100 / 4（Azure 单请求上限远高于此，取保守值）。
+- 按 provider 策略：LLM 8000 字符 / 400 段 / 8 路；DeepL 3000 / 50 / 4（50 是 DeepL 单请求上限）；商汤 6000 / 300 / 1；微软 MT 5000 / 100 / 4（Azure 单请求上限远高于此，取保守值）；Google 免费接口 1500 / 10 / 1（一次一个 q，必须串行）。
 - 视口首屏 / 续翻在上面的策略之上再收紧到 2000 字符 / 60 段（并发不变）：否则首屏候选会攒成一个 8k 大请求，第一批译文要等整批返回。整页模式仍用完整策略。
 - 失败批在主线结束后用 2 路补跑一次，仍失败才计入 `failed`；并发下熔断可能多带最多 `并发数-1` 批。
 - 输出被截断（分段数不符 / JSON 解析失败）时自动二分重试；HTTP 401/429 不拆，避免放大请求。
@@ -71,7 +71,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 ## 加翻译服务
 
 1. 预设：`extension/lib/provider-presets.js` 的 `PROVIDER_PRESETS` 加一条（`id/label/protocol/baseUrl/models/supportsModelList/verified`）；`{baseUrl}/models` 不是通用推导时补 `modelsUrl`。
-2. 协议：现有七种（`openai-chat` / `openai-responses` / `anthropic-messages` / `google-gemini` / `microsoft-edge` / `microsoft-azure` / `deepl`）。新协议加进 `extension/lib/protocols.js` 的 `PROTOCOLS`，并补 `types.d.ts` 的 `ProtocolId`；MT 协议要设 `supportsGlossary: false`。
+2. 协议：现有八种（`openai-chat` / `openai-responses` / `anthropic-messages` / `google-gemini` / `microsoft-edge` / `microsoft-azure` / `google-free` / `deepl`）。新协议加进 `extension/lib/protocols.js` 的 `PROTOCOLS`，并补 `types.d.ts` 的 `ProtocolId`；MT 协议要设 `supportsGlossary: false`。
 3. 需要额外字段（如微软的 `region`）时，同时改 `ProviderConfig`、`normalizeSettings` 和设置页卡片。
 
 设置页按预设渲染，不再依赖 `PROVIDER_TYPES` / `type.fields`（那只是旧调用方的兼容入口）。微软 Edge / Azure 已实现；Index-Translate 只提供本地代理预设。
@@ -89,7 +89,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 ## 计划与本地工具
 
-- `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md` 是施工图与验收记录。阶段 A–F 均已落地（含 E 的视口优先 / 滚动续翻、F 的微软翻译 + 可选审校）；G1/G2 是可选实验，尚未实现。
+- `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md` 是施工图与验收记录。阶段 A–F 与 G1 均已落地（含 E 的视口优先 / 滚动续翻、F 的微软翻译 + 可选审校、G1 的 Google 免费接口 stub）；G2 只做了 spike（`downloadable`，未接入）。
 - `.agents/` 与 `skills-lock.json` 是本地安装的 agent skill（含 `chrome-extensions`），已 gitignore，不要提交。
 - 参考 KISS Translator 时只借鉴思路 / 默认值；它是 **GPL-3.0**，不要复制源码、prompt、资源，也不要作为依赖引入。
 
@@ -99,6 +99,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - `response_format` 回退只在 400/404/422；401/403/429 直接上抛，否则一次 429 会变成 8 次请求。
 - Microsoft Edge 是浏览器内部接口：`POST /translate/translatetext?...`，body 是**纯字符串数组**，没有 Authorization；Azure 是 `[{ Text }]` + `Ocp-Apim-Subscription-Key`（区域资源还要 `Ocp-Apim-Subscription-Region`）。两者响应同形，别把 body 混用。
 - 审校服务必须是 LLM；配成 DeepL / 微软会让审校直接标记失败。审校修正按顺序对齐，不要改成依赖模型返回的 `index`。
+- Google 免费接口一次只能发一个 `q`，长文本按 ≤1600 字符切开串行请求；本机网络实测不可达，预设只做 stub、不做默认。
 - 双语会跳过含 `PRE/CODE/KBD/SAMP/...` 后代的块（含内联 `<code>`），这是有意的覆盖率损失。
 - 视口判定的 rect 全 0 视为隐藏/未布局；`smoke:dom` 的假 DOM 默认给可见 rect，测视口用例时用 `offscreen(el)` 设置元素 rect。
 - `smoke:dom` 的 `window` / `document` 事件与 `MutationObserver` 都是桩：要触发续翻，用 `fireListener(windowListeners, 'scroll')` 或 `fireMutations(...)`。

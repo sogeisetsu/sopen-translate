@@ -3,23 +3,24 @@
  *
  * - `name` 给大模型 prompt 用；
  * - `code` 给 DeepL 这类需要语言代码的服务用；
- * - `ms` 给微软翻译（Edge / Azure）用，两者共用同一套语言码。
+ * - `ms` 给微软翻译（Edge / Azure）用，两者共用同一套语言码；
+ * - `google` 给 Google 免费网页接口用。
  *
- * @typedef {{ id: string, name: string, code: string, ms: string }} Language
+ * @typedef {{ id: string, name: string, code: string, ms: string, google: string }} Language
  */
 
 /** @type {Language[]} */
 export const LANGUAGES = [
-  { id: 'zh-Hans', name: '简体中文', code: 'ZH-HANS', ms: 'zh-Hans' },
-  { id: 'zh-Hant', name: '繁体中文', code: 'ZH-HANT', ms: 'zh-Hant' },
-  { id: 'ja', name: '日语', code: 'JA', ms: 'ja' },
-  { id: 'ko', name: '韩语', code: 'KO', ms: 'ko' },
-  { id: 'en', name: '英语', code: 'EN-US', ms: 'en' },
-  { id: 'fr', name: '法语', code: 'FR', ms: 'fr' },
-  { id: 'de', name: '德语', code: 'DE', ms: 'de' },
-  { id: 'es', name: '西班牙语', code: 'ES', ms: 'es' },
-  { id: 'ru', name: '俄语', code: 'RU', ms: 'ru' },
-  { id: 'pt', name: '葡萄牙语', code: 'PT-BR', ms: 'pt' },
+  { id: 'zh-Hans', name: '简体中文', code: 'ZH-HANS', ms: 'zh-Hans', google: 'zh-CN' },
+  { id: 'zh-Hant', name: '繁体中文', code: 'ZH-HANT', ms: 'zh-Hant', google: 'zh-TW' },
+  { id: 'ja', name: '日语', code: 'JA', ms: 'ja', google: 'ja' },
+  { id: 'ko', name: '韩语', code: 'KO', ms: 'ko', google: 'ko' },
+  { id: 'en', name: '英语', code: 'EN-US', ms: 'en', google: 'en' },
+  { id: 'fr', name: '法语', code: 'FR', ms: 'fr', google: 'fr' },
+  { id: 'de', name: '德语', code: 'DE', ms: 'de', google: 'de' },
+  { id: 'es', name: '西班牙语', code: 'ES', ms: 'es', google: 'es' },
+  { id: 'ru', name: '俄语', code: 'RU', ms: 'ru', google: 'ru' },
+  { id: 'pt', name: '葡萄牙语', code: 'PT-BR', ms: 'pt', google: 'pt' },
 ];
 
 /** 新装默认语言 */
@@ -47,6 +48,19 @@ export function findLanguage(nameOrCode) {
 export function microsoftCode(nameOrCode) {
   const language = findLanguage(nameOrCode);
   if (language) return language.ms;
+  const raw = String(nameOrCode ?? '').trim();
+  return raw || 'en';
+}
+
+/**
+ * Google 免费网页接口语言码：`ZH-HANS → zh-CN`、`ZH-HANT → zh-TW`。
+ * 列表外的老值原样返回。
+ * @param {string | undefined | null} nameOrCode
+ * @returns {string}
+ */
+export function googleCode(nameOrCode) {
+  const language = findLanguage(nameOrCode);
+  if (language) return language.google;
   const raw = String(nameOrCode ?? '').trim();
   return raw || 'en';
 }

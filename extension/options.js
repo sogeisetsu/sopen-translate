@@ -95,7 +95,7 @@ function setSaved(text, isError = false) {
 /* -------------------------------- 校验 -------------------------------- */
 
 /** MT 协议没有 prompt 通道：不显示模型字段，也不参与术语保护 */
-const MT_PROTOCOLS = new Set(['deepl', 'microsoft-edge', 'microsoft-azure']);
+const MT_PROTOCOLS = new Set(['deepl', 'microsoft-edge', 'microsoft-azure', 'google-free']);
 
 /** @param {ProviderConfig} provider */
 function isMtProvider(provider) {
@@ -124,7 +124,7 @@ function missingRequired(provider) {
   const missing = [];
   if (!String(provider.baseUrl ?? '').trim()) missing.push('接口地址');
 
-  if (provider.protocol === 'microsoft-edge') return missing;
+  if (provider.protocol === 'microsoft-edge' || provider.protocol === 'google-free') return missing;
   if (provider.protocol === 'deepl' || provider.protocol === 'microsoft-azure') {
     if (!String(provider.apiKey ?? '').trim()) missing.push('API Key');
     return missing;
@@ -296,6 +296,7 @@ function providerCard(provider, index) {
   const isMt = isMtProvider(provider);
   const isEdge = provider.protocol === 'microsoft-edge';
   const isAzure = provider.protocol === 'microsoft-azure';
+  const hideKey = isEdge || provider.protocol === 'google-free';
 
   const head = h(
     'div',
@@ -324,7 +325,7 @@ function providerCard(provider, index) {
 
   /** @type {HTMLElement[]} */
   const fields = [];
-  if (!isEdge) {
+  if (!hideKey) {
     fields.push(
       h(
         'label',
