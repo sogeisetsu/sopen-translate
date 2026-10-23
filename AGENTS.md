@@ -19,6 +19,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 合并前必须 `npm run check` + `npm run smoke` + `npm run smoke:dom` 全绿；冲突在分支上解决。
 - 不要 force-push `main`；不要为了省事直接 commit 到 `main`（除非用户明确要求）。
 - 命名用 `feat/...`、`fix/...`，一个分支只做一件事。
+- **提交身份（硬约束）**：所有提交必须使用用户的全局 Git 身份（`git config --global user.name` / `user.email`），不要用 `-c user.name=... -c user.email=...` 覆盖，也不要自造 `opencode@local` 之类的占位身份。读不到全局身份就停下来问用户，不要猜；不要改用户的 git config。历史里已有的 `opencode <opencode@local>` 提交不主动重写，除非用户明确要求 force-push。
 
 ## 隐私与密钥（硬约束）
 
