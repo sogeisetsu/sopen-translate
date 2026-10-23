@@ -183,6 +183,17 @@ export const PROVIDER_PRESETS = [
     hint: '需要 API Key；区域资源还要填 Region。页面文本会发给微软。',
   },
   {
+    id: 'google-free',
+    label: 'Google 免费网页接口',
+    protocol: 'google-free',
+    baseUrl: 'https://translate.googleapis.com',
+    models: [],
+    supportsModelList: false,
+    requiresKey: false,
+    verified: false,
+    hint: '非官方免费接口，无需 key；本机网络实测不可达，可能随时限流/失效。不做默认。',
+  },
+  {
     id: 'custom',
     label: '自定义',
     protocol: 'openai-chat',

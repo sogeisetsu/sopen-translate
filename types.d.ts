@@ -12,7 +12,8 @@ export type ProtocolId =
   | 'google-gemini'
   | 'deepl'
   | 'microsoft-edge'
-  | 'microsoft-azure';
+  | 'microsoft-azure'
+  | 'google-free';
 
 export type EnforcementMode = 'fallback' | 'repair' | 'warn';
 export type DisplayMode = 'translation' | 'bilingual';

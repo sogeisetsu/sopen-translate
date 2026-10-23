@@ -7,10 +7,10 @@
 
 ## 执行入口（2026-10-23，新会话先读这里）
 
-**已完成**：阶段 A、B（含 B6）、C、D，E1–E6（E2 关闭思考含在内），以及 F1–F5（微软翻译 + 可选审校）。
+**已完成**：阶段 A、B（含 B6）、C、D，E1–E6（E2 关闭思考含在内），F1–F5（微软翻译 + 可选审校），以及 G1（Google 免费接口，stub）。
 仓库版本 `0.2.0`，`check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
-**剩余工作只有**：G1/G2（Google 免费接口 / 设备端 Translator API）——**可选实验**，G2 先 spike，通过再接入；不通过就只记录结论。
-**不要重做 A–F**；它们的细节是历史记录，只在新改动碰到时查阅。
+**剩余工作只有**：无。G2（设备端 Translator API）只做了 spike：Edge 157 返回 `downloadable`，未下载语言包、未接入。
+**不要重做 A–G1**；它们的细节是历史记录，只在新改动碰到时查阅。
 
 ### 施工顺序与分支（硬约束）
 
@@ -112,8 +112,8 @@ Edge 是内部接口，Index-Translate 是公网免费接口，都可能随时�
 - [x] F3 可选 AI 定点修正：第二 provider，只审可疑段、返回修正译文
 - [x] F4 设置页：微软 `region` + 「审校服务」下拉 + 隐私说明
 - [x] F5 验收：Edge 免费接口四页 A/B；Azure 有 key 再补；收益不足就不上审校层
-- [ ] G1 Google 免费网页接口（本机网络不可达，仅实现 + stub）
-- [ ] G2 设备端 `Translator` API spike（通过再接入）
+- [x] G1 Google 免费网页接口（本机网络不可达，仅实现 + stub）
+- [x] G2 设备端 `Translator` API spike（通过再接入）
 
 ---
 
@@ -1858,6 +1858,15 @@ UX 优先的做法：**Edge 内部接口做默认零配置**；Index-Translate �
 - G1：stub 测试 + 真机直连（本机预期失败，记录错误）；设置页标「接口未实测」。
 - G2：spike 结论（可用/不可用 + 原因）；可用则 3 段中译 + 语言包状态 + 还原。
 - 回归：`check` / `smoke` / `smoke:dom` 全绿。
+
+### G 验收记录（2026-10-23）
+
+- **G1**：新增 `google-free` 协议与预设，`supportsGlossary: false`；一次一个 `q`，长文本按 ≤1600 字符切开串行请求，策略 1500 字符 / 10 段 / 1 路。`googleCode` 映射 `ZH-HANS → zh-CN`、`ZH-HANT → zh-TW`。`npm run smoke` 覆盖单 q / 顺序 / 多句拼接 / 长文本切分 / 语言码，全部通过。**本机 `fetch` 仍不可达**，没有联网验收；预设 `verified: false`、不做默认，设置页标「接口未实测」。
+- **G2 spike**：Edge 157 headless 普通页面里 `'Translator' in self === true`；`Translator.availability({ sourceLanguage: 'en', targetLanguage: 'zh' })` 返回 **`downloadable`**（首次需下载语言包）。按计划停在 spike，不接入：
+  - 语言包需要下载（体积未测），`downloadable` 时 `create()` 必须由用户手势触发；
+  - content script 的 isolated world 里能否直接复用该 API 未验证；
+  - 未处理语言包下载 UI、串行性能与失败回退，贸然接入会变成“看起来可用、实际不可用”的假预设。
+- 回归：`check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
 
 ## G 风险
 

@@ -15,7 +15,7 @@ import { loadModelList, parseModelList, resolveModelsUrl } from '../extension/li
 import { normalizeSettings, migrateSettings } from '../extension/lib/settings.js';
 import { compileGlossary, matchTerms, modelTokens } from '../extension/lib/glossary.js';
 import { reasoningOffParams } from '../extension/lib/reasoning.js';
-import { microsoftCode } from '../extension/lib/languages.js';
+import { googleCode, microsoftCode } from '../extension/lib/languages.js';
 import { findSuspicious, REVIEW_MAX_SEGMENTS } from '../extension/lib/review.js';
 
 let failures = 0;
@@ -868,6 +868,78 @@ await test('microsoftCode：10 种语言映射，老值原样返回', async () =
   assert.equal(microsoftCode('简体中文'), 'zh-Hans');
   assert.equal(microsoftCode('Klingon'), 'Klingon');
   assert.equal(microsoftCode(''), 'en');
+});
+
+/* ------------------------------ Google 免费接口 ------------------------------ */
+
+const googleConfig = {
+  id: 'google',
+  presetId: 'google-free',
+  protocol: 'google-free',
+  baseUrl: 'https://translate.googleapis.com',
+};
+
+await test('google-free：一个请求一个 q，按顺序返回，语言码用 zh-CN', async () => {
+  /** @type {{ url: string, method: string }[]} */
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: String(init?.method || 'GET') });
+    const query = new URL(String(url)).searchParams.get('q');
+    return new Response(JSON.stringify({ sentences: [{ trans: `译:${query}` }] }), { status: 200 });
+  };
+
+  const result = await translateBatch({
+    texts: ['a', 'b'],
+    config: googleConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+  });
+
+  assert.deepEqual(result.translations, ['译:a', '译:b']);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].method, 'GET');
+  assert.match(calls[0].url, /tl=zh-CN/);
+  assert.equal(new URL(calls[0].url).searchParams.get('sl'), 'auto');
+});
+
+await test('google-free：多句响应拼接，长文本按 ≤1600 字符切分', async () => {
+  /** @type {string[]} */
+  const queries = [];
+  globalThis.fetch = async (url) => {
+    queries.push(new URL(String(url)).searchParams.get('q') || '');
+    return new Response(JSON.stringify({ sentences: [{ trans: '甲' }, { trans: '乙' }] }), {
+      status: 200,
+    });
+  };
+
+  const short = await translateBatch({
+    texts: ['hello'],
+    config: googleConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+  });
+  assert.deepEqual(short.translations, ['甲乙']);
+
+  queries.length = 0;
+  const long = '句子。'.repeat(700);
+  const result = await translateBatch({
+    texts: [long],
+    config: googleConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+  });
+  assert.equal(queries.length, 2, '2100 字符应切成 2 个 q');
+  assert.ok(queries.every((query) => query.length <= 1600));
+  assert.equal(result.translations.length, 1);
+});
+
+await test('googleCode：zh-CN / zh-TW / 泛代码映射', async () => {
+  assert.equal(googleCode('ZH-HANS'), 'zh-CN');
+  assert.equal(googleCode('ZH-HANT'), 'zh-TW');
+  assert.equal(googleCode('EN-US'), 'en');
+  assert.equal(googleCode('PT-BR'), 'pt');
+  assert.equal(googleCode('简体中文'), 'zh-CN');
+  assert.equal(googleCode('Klingon'), 'Klingon');
 });
 
 /* ------------------------------ 审校规则 ------------------------------ */

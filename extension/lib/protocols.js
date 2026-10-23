@@ -9,11 +9,11 @@
  * @typedef {import('../../types').ProtocolId} ProtocolId
  */
 
-import { ProviderError, clip, fail, joinUrl, postJson } from './http.js';
+import { ProviderError, clip, fail, getJson, joinUrl, postJson } from './http.js';
 import { parseSegments } from './segments.js';
 import { reasoningOffParams } from './reasoning.js';
 import { buildRepairSystemPrompt, buildSystemPrompt, buildUserPayload } from './prompt.js';
-import { microsoftCode } from './languages.js';
+import { googleCode, microsoftCode } from './languages.js';
 
 /** 已经证明不支持思考开关的配置（preset|baseUrl|model），避免每批都 400 一次 */
 const reasoningUnsupported = new Set();
@@ -350,6 +350,114 @@ const microsoftAzure = {
   },
 };
 
+/* ---------------------------- Google 免费接口 ---------------------------- */
+
+/** 非官方网页接口一次只接受一个 q；超过这个长度就按句切开串行请求 */
+const GOOGLE_FREE_MAX_CHARS = 1600;
+
+/**
+ * @param {string} text
+ * @param {number} [max]
+ * @returns {string[]}
+ */
+function splitGoogleText(text, max = GOOGLE_FREE_MAX_CHARS) {
+  const source = String(text ?? '');
+  if (source.length <= max) return [source];
+
+  const sentences = source
+    .split(/(?<=[。！？!?;；])\s*|\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  /** @type {string[]} */
+  const chunks = [];
+  let current = '';
+  for (const sentence of sentences) {
+    if (sentence.length > max) {
+      if (current) {
+        chunks.push(current);
+        current = '';
+      }
+      for (let i = 0; i < sentence.length; i += max) chunks.push(sentence.slice(i, i + max));
+      continue;
+    }
+    if (current && current.length + sentence.length + 1 > max) {
+      chunks.push(current);
+      current = sentence;
+    } else {
+      current = current ? `${current} ${sentence}` : sentence;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks.map((chunk) => chunk.trim()).filter(Boolean);
+}
+
+/** @param {string} text @returns {boolean} */
+function endsWithCjk(text) {
+  return /[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]$/.test(text);
+}
+
+/**
+ * @param {string} left
+ * @param {string} right
+ * @returns {string}
+ */
+function joinGoogleChunks(left, right) {
+  if (!left) return right;
+  if (!right) return left;
+  return endsWithCjk(left) ? left + right : `${left} ${right}`;
+}
+
+/**
+ * Chrome / Google 免费网页接口（非官方、无需 key、一次一个 q）。
+ * 本机网络实测不可达；只实现 + stub，预设标「接口未实测」，不做默认。
+ * @type {Protocol}
+ */
+const googleFree = {
+  id: 'google-free',
+  label: 'Google 免费网页接口（非官方）',
+  supportsGlossary: false,
+  buildRequest(args) {
+    const text = args.texts[0] ?? '';
+    const code = googleCode(args.targetCode || args.target);
+    const query = new URLSearchParams({
+      client: 'gtx',
+      dj: '1',
+      dt: 't',
+      ie: 'UTF-8',
+      sl: 'auto',
+      tl: code,
+      q: text,
+    });
+    return {
+      url: `https://translate.googleapis.com/translate_a/single?${query.toString()}`,
+      headers: {},
+      body: undefined,
+    };
+  },
+  parseResponse(json) {
+    const sentences = json?.sentences;
+    if (!Array.isArray(sentences)) {
+      fail(`响应缺少 sentences：${clip(JSON.stringify(json))}`);
+    }
+    return [sentences.map((/** @type {any} */ item) => String(item?.trans ?? '')).join('')];
+  },
+  async translate(args) {
+    /** @type {string[]} */
+    const out = [];
+    for (const text of args.texts) {
+      let merged = '';
+      for (const chunk of splitGoogleText(text)) {
+        const request = googleFree.buildRequest({ ...args, texts: [chunk] });
+        const data = await getJson(request.url, { timeoutMs: 15000 });
+        merged = joinGoogleChunks(merged, googleFree.parseResponse(data)[0] ?? '');
+      }
+      out.push(merged);
+    }
+    return out;
+  },
+};
+
 /* --------------------------------- DeepL --------------------------------- */
 
 /** @type {Protocol} */
@@ -394,6 +502,7 @@ export const PROTOCOLS = {
   'google-gemini': googleGemini,
   'microsoft-edge': microsoftEdge,
   'microsoft-azure': microsoftAzure,
+  'google-free': googleFree,
   deepl,
 };
 

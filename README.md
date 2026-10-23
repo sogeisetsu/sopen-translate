@@ -5,7 +5,7 @@
 - 纯译文 / 双语两种展示模式，随时可还原
 - 视口优先：先翻当前视野，滚动继续补翻；也可切「整页」一次翻完
 - 术语保护：品牌、产品、型号名不被翻译（可内置词库 + 自定义词表）
-- 15 个内置服务预设 + 自定义，模型列表可联网刷新
+- 16 个内置服务预设 + 自定义，模型列表可联网刷新
 - API 密钥保存在浏览器本地，不上传、不同步、不进仓库
 
 ## 设计约束
@@ -29,8 +29,8 @@ extension/              # chrome://extensions 里直接加载这个目录
   lib/
     settings.js         # chrome.storage.local 读写、schema 迁移、sessionId
     languages.js        # 目标语言唯一来源（10 项）
-    provider-presets.js # 15 个内置预设 + custom
-    protocols.js        # 7 种协议的 URL / 鉴权 / 请求体 / 响应解析
+    provider-presets.js # 16 个内置预设 + custom
+    protocols.js        # 8 种协议的 URL / 鉴权 / 请求体 / 响应解析
     providers.js        # translateBatch：等长校验 + 术语注入 + 译后校验；reviewTranslations：审校层
     http.js             # 超时、429 退避、ProviderError
     segments.js         # 模型返回解析
@@ -67,7 +67,7 @@ npm run build:glossary -- --check   # 校验入库词库与源文件一致
 
 ## 翻译服务
 
-内置 15 个预设，另可添加「自定义」（7 种协议任选）。**标「接口未实测」的只有路由级验证，没有真 key 端到端跑过**，设置页会明确标注。
+内置 16 个预设，另可添加「自定义」（8 种协议任选）。**标「接口未实测」的只有路由级验证，没有真 key 端到端跑过**，设置页会明确标注。
 
 | 预设 | 协议 | 验证状态 |
 | --- | --- | --- |
@@ -75,6 +75,7 @@ npm run build:glossary -- --check   # 校验入库词库与源文件一致
 | 商汤 SenseNova | OpenAI Chat | 已实测（RPM 较低，自动退避重试） |
 | DeepL | DeepL | 已实测（不支持术语保护） |
 | Microsoft Edge 翻译 | Microsoft Edge | 已实测（无需 key；四页扩展内跑通） |
+| Google 免费网页接口 | Google 免费 | 接口未实测（本机网络不可达；非官方，不做默认） |
 | Microsoft Azure Translator | Microsoft Azure | 接口未实测（需要 key + Region） |
 | Index-Translate（本地代理） | OpenAI Chat | 接口未实测（需要本地代理，浏览器直连会 412） |
 | OpenAI | OpenAI Chat | 接口未实测 |
@@ -85,10 +86,10 @@ npm run build:glossary -- --check   # 校验入库词库与源文件一致
 | MiniMax | OpenAI Chat | 接口未实测 |
 | OpenRouter | OpenAI Chat | 接口未实测 |
 | 硅基流动 | OpenAI Chat | 接口未实测 |
-| 自定义 | 7 种协议任选 | 取决于你填的地址 |
+| 自定义 | 8 种协议任选 | 取决于你填的地址 |
 
 - **模型**：下拉 + 「刷新」按钮；刷新会调后台 `models.list`，失败/超时就退回预设建议，不弹红字。也可以切「手动输入」。
-- **自定义协议**：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`microsoft-edge`、`microsoft-azure`、`deepl`。
+- **自定义协议**：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`microsoft-edge`、`microsoft-azure`、`google-free`、`deepl`。
 - **本地服务**（Ollama / One-API）走「自定义」，API Key 可以留空。
 - **微软翻译**：Edge 预设走浏览器内置翻译的内部免费接口，无需 key；Azure 是官方稳定版，需要 key，区域资源还要填 `Region`。两种都会把页面文本发给微软。
 - **Index-Translate**：免费 LLM，但公网接口对浏览器/扩展返回 412，需要先在本地跑仓库提供的代理（默认 `http://127.0.0.1:8080/v1`）。
@@ -153,7 +154,7 @@ popup 与设置页共用 `extension/lib/languages.js` 的 10 项列表：简体�
   - 长块按句切分会丢一点跨句上下文；单句超 1200 字符时硬切
   - 无限滚动页面会持续产生补翻任务，靠熔断与隐藏暂停兜底；进度 `total` 会随滚动增长
   - 翻译中改目标语言：popup 会禁用相关控件，但设置页不感知，可能让同一页前后批次用不同语言
-  - 15 个预设里除 OpenCode Go / 商汤 / DeepL / Edge 接口外，其余只有路由级验证，baseUrl / 模型名可能过期
+  - 16 个预设里除 OpenCode Go / 商汤 / DeepL / Edge 接口外，其余只有路由级或 stub 验证，baseUrl / 模型名可能过期；Google 免费接口在本机网络不可达
   - 限流端点（OpenCode Go、商汤）在超长页面上可能因 429 触发熔断，只翻一部分；长页面优先用 DeepL 或微软 MT
   - Microsoft Edge 翻译是浏览器内部接口：无 SLA、可能限流或改路径；失效时要能切到 Azure / 自定义
   - 审校只做规则筛出的可疑段，不保证全页质量；配置审校后页面文本会多一个数据流向
@@ -161,4 +162,4 @@ popup 与设置页共用 `extension/lib/languages.js` 的 10 项列表：简体�
 
 ## 状态
 
-`0.2.0`。自动化检查（类型、两套冒烟、词库一致性）通过；阶段 E/F 的真机验收记录见 `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md`。
+`0.2.0`。自动化检查（类型、两套冒烟、词库一致性）通过；阶段 E/F 的真机与 G 的 spike 记录见 `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md`。
