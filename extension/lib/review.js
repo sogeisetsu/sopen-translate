@@ -12,6 +12,7 @@
  */
 
 import { verifySegment } from './glossary.js';
+import { parseJsonPayload } from './segments.js';
 
 /** 每页最多送审的段数与源文字符数（超出只取前面的，交给调用方标记 truncated） */
 export const REVIEW_MAX_SEGMENTS = 200;
@@ -185,11 +186,12 @@ export function buildReviewSystemPrompt(target) {
     `你是翻译审校器。目标语言是「${target}」。`,
     '输入是 JSON：segments 是待检查片段数组，每项含 index / source / primary / reasons / missing。',
     '逐项检查 primary 译文：',
-    '- 只修正确实有问题的译文；没有问题就原样返回 primary，不要润色、不要改语气。',
+    '- 只修正确实有问题的译文；没有问题就跳过，不要润色、不要改语气。',
     '- 必须保留 source 中的专有名词、品牌名、型号、代码、URL、数字和占位符。',
     '- 不要合并、拆分、增删片段。',
-    '只输出 JSON：{"segments":["修正后的译文", "..."]}。',
-    '数组长度必须与输入完全一致、顺序不变，每项都是字符串；不要输出 index，不要解释。',
+    '只输出 JSON：{"segments":[{"index":3,"corrected":"修正后的译文"}]}。',
+    '- 只返回需要修正的片段，index 必须与输入中的 index 一致；corrected 必须是字符串且非空。',
+    '- 不要输出解释，不要返回没有问题的片段。',
   ].join('\n');
 }
 
@@ -216,42 +218,70 @@ export function buildReviewRequest({ target, items, sources, translations }) {
 }
 
 /**
- * 把模型返回的修正按顺序套回可疑段；任何校验不过的条目丢弃。
+ * 解析审校响应：只接受 `{ segments: [{ index, corrected }] }`。
+ * 非法条目（index 不是非负整数、corrected 不是字符串）直接丢弃；
+ * 空 corrected 在套用阶段再丢弃。
+ * @param {unknown} content
+ * @returns {import('../../types').ReviewCorrection[]}
+ */
+export function parseReviewResponse(content) {
+  const data = parseJsonPayload(content);
+  const segments = data?.segments;
+  if (!Array.isArray(segments)) return [];
+
+  /** @type {import('../../types').ReviewCorrection[]} */
+  const out = [];
+  for (const item of segments) {
+    const index = Number(item?.index);
+    if (!Number.isInteger(index) || index < 0) continue;
+    out.push({ index, corrected: String(item?.corrected ?? '') });
+  }
+  return out;
+}
+
+/**
+ * 只替换 index 在可疑段集合内、corrected 非空且校验通过的条目。
+ * 重复 index 只取第一次有效修正。
  * @param {Object} args
  * @param {string[]} args.sources
  * @param {string[]} args.translations
  * @param {ReviewItem[]} args.items
- * @param {string[]} args.corrected
+ * @param {import('../../types').ReviewCorrection[]} args.corrections
  * @param {ReturnType<typeof import('./glossary.js').compileGlossary>} args.compiled
  * @returns {{ translations: string[], corrected: number }}
  */
-export function applyReviewCorrections({ sources, translations, items, corrected, compiled }) {
+export function applyReviewCorrections({ sources, translations, items, corrections, compiled }) {
   const next = translations.slice();
-  if (corrected.length !== items.length) return { translations: next, corrected: 0 };
-
+  const byIndex = new Map(items.map((item) => [item.index, item]));
+  const applied = new Set();
   let count = 0;
-  items.forEach((item, position) => {
-    const text = String(corrected[position] ?? '').trim();
-    if (!text) return;
+
+  for (const correction of corrections) {
+    const item = byIndex.get(correction.index);
+    if (!item || applied.has(correction.index)) continue;
+
+    const text = String(correction.corrected ?? '').trim();
+    if (!text) continue;
 
     const source = String(sources[item.index] ?? '');
     const primary = String(translations[item.index] ?? '').trim();
-    if (text === primary) return;
+    if (text === primary) continue;
     // 没有术语缺失时，“修正”成原文等于没翻；有术语缺失时保留原文是合法的保护手段
-    if (text === source.trim() && item.missing.length === 0) return;
+    if (text === source.trim() && item.missing.length === 0) continue;
     // 修正不能丢掉原文里的数字 / URL / 占位符
-    if (countNumbers(text) !== countNumbers(source)) return;
-    if (countUrls(text) !== countUrls(source)) return;
-    if (countPlaceholders(text) !== countPlaceholders(source)) return;
+    if (countNumbers(text) !== countNumbers(source)) continue;
+    if (countUrls(text) !== countUrls(source)) continue;
+    if (countPlaceholders(text) !== countPlaceholders(source)) continue;
     // 仍然漏术语的“修正”没有价值，丢弃
     if (item.missing.length > 0) {
       const verdict = verifySegment({ source, translated: text, compiled, allowed: compiled.terms });
-      if (!verdict.ok) return;
+      if (!verdict.ok) continue;
     }
 
     next[item.index] = text;
+    applied.add(correction.index);
     count += 1;
-  });
+  }
 
   return { translations: next, corrected: count };
 }

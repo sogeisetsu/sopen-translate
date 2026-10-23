@@ -17,7 +17,7 @@
 import { ProviderError, fail } from './http.js';
 import { PROTOCOLS, getProtocol } from './protocols.js';
 import { compileGlossary, matchTerms, promptTerms, verifySegment } from './glossary.js';
-import { applyReviewCorrections, buildReviewRequest, findSuspicious } from './review.js';
+import { applyReviewCorrections, buildReviewRequest, findSuspicious, parseReviewResponse } from './review.js';
 
 /**
  * @param {string[]} translations
@@ -265,10 +265,13 @@ export async function reviewTranslations({
     return { translations, review: { ...base, failed: true }, usedChars };
   }
   if (items.length === 0) return { translations, review: base, usedChars };
+  if (typeof protocol.requestContent !== 'function') {
+    return { translations, review: { ...base, failed: true }, usedChars };
+  }
 
   try {
     const request = buildReviewRequest({ target, items, sources, translations });
-    const corrected = await protocol.translate({
+    const content = await protocol.requestContent({
       texts: [],
       config,
       target,
@@ -279,10 +282,8 @@ export async function reviewTranslations({
       system: request.system,
       userContent: request.userContent,
     });
-    if (corrected.length !== items.length) {
-      return { translations, review: { ...base, failed: true }, usedChars };
-    }
-    const applied = applyReviewCorrections({ sources, translations, items, corrected, compiled });
+    const corrections = parseReviewResponse(content);
+    const applied = applyReviewCorrections({ sources, translations, items, corrections, compiled });
     return {
       translations: applied.translations,
       review: { ...base, corrected: applied.corrected },

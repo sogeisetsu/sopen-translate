@@ -1043,7 +1043,7 @@ await test('review 预算：maxSegments 限制本页送审段数，0 时不发�
   let calls = 0;
   globalThis.fetch = async () => {
     calls += 1;
-    return new Response(chatResult(['Kubernetes 简介']), { status: 200 });
+    return new Response(chatResult([{ index: 0, corrected: 'Kubernetes 简介' }]), { status: 200 });
   };
 
   const limited = await reviewTranslations({
@@ -1078,7 +1078,7 @@ await test('review 预算：maxSegments 限制本页送审段数，0 时不发�
 
 /* ------------------------------ 审校请求 ------------------------------ */
 
-await test('review：修正可疑段，按顺序对齐并保留术语', async () => {
+await test('review：按 index 修正可疑段并保留术语', async () => {
   /** @type {Call[]} */
   const calls = [];
   globalThis.fetch = async (_url, init) => {
@@ -1086,8 +1086,9 @@ await test('review：修正可疑段，按顺序对齐并保留术语', async ()
     calls.push({ url: '', body, headers: init.headers });
     const payload = JSON.parse(body.messages[1].content);
     assert.equal(payload.segments.length, 1);
+    assert.equal(payload.segments[0].index, 0);
     assert.equal(payload.segments[0].source, 'Kubernetes 简介');
-    return new Response(chatResult(['Kubernetes 简介']), { status: 200 });
+    return new Response(chatResult([{ index: 0, corrected: 'Kubernetes 简介' }]), { status: 200 });
   };
 
   const result = await reviewTranslations({
@@ -1104,6 +1105,7 @@ await test('review：修正可疑段，按顺序对齐并保留术语', async ()
   assert.equal(result.review.corrected, 1);
   assert.deepEqual(result.translations, ['Kubernetes 简介']);
   assert.match(calls[0].body.messages[0].content, /JSON/);
+  assert.match(calls[0].body.messages[0].content, /corrected/);
   assert.match(calls[0].body.messages[0].content, /审校/);
 });
 
@@ -1117,13 +1119,15 @@ await test('review：空修正、无术语时同原文、仍漏术语的条目�
     glossary: ['Kubernetes'],
   };
 
-  globalThis.fetch = async () => new Response(chatResult(['']), { status: 200 });
+  globalThis.fetch = async () =>
+    new Response(chatResult([{ index: 0, corrected: '' }]), { status: 200 });
   const empty = await reviewTranslations(termArgs);
   assert.equal(empty.review.corrected, 0);
   assert.deepEqual(empty.translations, ['简介']);
 
   // 没有术语缺失时，把译文“修正”成原文等于没翻
-  globalThis.fetch = async () => new Response(chatResult(['Hello there']), { status: 200 });
+  globalThis.fetch = async () =>
+    new Response(chatResult([{ index: 0, corrected: 'Hello there' }]), { status: 200 });
   const sameAsSource = await reviewTranslations({
     sources: ['Hello there'],
     translations: ['你好'],
@@ -1135,13 +1139,14 @@ await test('review：空修正、无术语时同原文、仍漏术语的条目�
   assert.equal(sameAsSource.review.corrected, 0);
   assert.deepEqual(sameAsSource.translations, ['你好']);
 
-  globalThis.fetch = async () => new Response(chatResult(['仍然没有术语']), { status: 200 });
+  globalThis.fetch = async () =>
+    new Response(chatResult([{ index: 0, corrected: '仍然没有术语' }]), { status: 200 });
   const stillMissing = await reviewTranslations(termArgs);
   assert.equal(stillMissing.review.corrected, 0);
   assert.deepEqual(stillMissing.translations, ['简介']);
 });
 
-await test('review：请求失败或数量不符时保留主译文并标记 failed', async () => {
+await test('review：请求失败或 JSON 坏掉时保留主译文并标记 failed', async () => {
   globalThis.fetch = async () => new Response('boom', { status: 500 });
   const failed = await reviewTranslations({
     sources: ['Kubernetes 简介'],
@@ -1154,8 +1159,8 @@ await test('review：请求失败或数量不符时保留主译文并标记 fail
   assert.equal(failed.review.failed, true);
   assert.deepEqual(failed.translations, ['简介']);
 
-  globalThis.fetch = async () => new Response(chatResult([]), { status: 200 });
-  const mismatch = await reviewTranslations({
+  globalThis.fetch = async () => new Response('not json', { status: 200 });
+  const broken = await reviewTranslations({
     sources: ['Kubernetes 简介'],
     translations: ['简介'],
     config: chatConfig,
@@ -1163,8 +1168,50 @@ await test('review：请求失败或数量不符时保留主译文并标记 fail
     targetCode: 'ZH-HANS',
     glossary: ['Kubernetes'],
   });
-  assert.equal(mismatch.review.failed, true);
-  assert.deepEqual(mismatch.translations, ['简介']);
+  assert.equal(broken.review.failed, true);
+  assert.deepEqual(broken.translations, ['简介']);
+});
+
+await test('review：index 越界/非法/重复/空条目只替换通过项', async () => {
+  globalThis.fetch = async () =>
+    new Response(
+      chatResult([
+        { index: 999, corrected: '越界' },
+        { index: -1, corrected: '负数' },
+        { index: 0, corrected: 'Kubernetes 简介' },
+        { index: 0, corrected: '重复' },
+        { index: 1, corrected: '' },
+      ]),
+      { status: 200 },
+    );
+
+  const result = await reviewTranslations({
+    sources: ['Kubernetes 简介', 'Kubernetes 部署'],
+    translations: ['简介', '部署'],
+    config: chatConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+  });
+
+  assert.equal(result.review.failed, false);
+  assert.equal(result.review.reviewed, 2);
+  assert.equal(result.review.corrected, 1);
+  assert.deepEqual(result.translations, ['Kubernetes 简介', '部署'], '只应用第一个有效 index');
+
+  // 没有任何条目不是失败：模型认为都不需要改
+  globalThis.fetch = async () => new Response(chatResult([]), { status: 200 });
+  const none = await reviewTranslations({
+    sources: ['Kubernetes 简介'],
+    translations: ['简介'],
+    config: chatConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+  });
+  assert.equal(none.review.failed, false);
+  assert.equal(none.review.corrected, 0);
+  assert.deepEqual(none.translations, ['简介']);
 });
 
 await test('review：审校服务配成 MT 时直接失败，不发请求', async () => {

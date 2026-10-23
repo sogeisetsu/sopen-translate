@@ -83,6 +83,12 @@ export interface ReviewItem {
   missing: string[];
 }
 
+/** 审校模型返回的单项：index 必须是送审片段里的下标，corrected 非空 */
+export interface ReviewCorrection {
+  index: number;
+  corrected: string;
+}
+
 
 export interface TranslateArgs {
   texts: string[];
@@ -126,8 +132,14 @@ export interface ProtocolBuildArgs {
 export interface Protocol {
   id: ProtocolId;
   label: string;
-  /** 是否支持 prompt 级术语注入；MT 为 false（DeepL / 微软） */
+  /** 是否支持 prompt 级术语注入；MT 为 false（DeepL / 微软 / Google 免费接口） */
   supportsGlossary?: boolean;
+  /** 从协议响应里取出模型文本（审校层用） */
+  extractContent?: (json: any) => string;
+  /** 只发请求并返回模型文本；不解析 segments（审校层用） */
+  requestContent?: (
+    args: ProtocolBuildArgs & { retry?: { delays: number[] } },
+  ) => Promise<string>;
   buildRequest: (args: ProtocolBuildArgs) => {
     url: string;
     headers: Record<string, string>;

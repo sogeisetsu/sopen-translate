@@ -1795,7 +1795,7 @@ UX 优先的做法：**Edge 内部接口做默认零配置**；Index-Translate �
 - Index-Translate：只加了本地代理预设，没有跑代理；公网直连 412 的说明写在 hint 与 README。
 - 回归：`check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
 
-**实现取舍**：审校响应使用「与可疑段等长的字符串数组、按顺序对齐」，没有采用计划里的 `{index, corrected}` 对象：这样直接复用协议层 `{segments:[...]}` 契约，模型改号 / 漏项也不会把译文写错位置；校验不过的条目一律丢弃。语义与 F3 一致。审校预算按 content 每轮翻译生成的 `pageToken` 在 background 累计（每页 200 段 / 8,000 字符），滚动续翻共用同一 token；每个翻译批次发一次审校请求，不是每段一次。
+**实现**：审校响应严格按 `{"segments":[{"index":n,"corrected":"..."}]}` 解析；index 必须属于送审集合，空值/越界/重复/非整数条目丢弃，只替换通过校验的段。审校预算按 content 每轮翻译生成的 `pageToken` 在 background 累计（每页 200 段 / 8,000 字符），滚动续翻共用同一 token；每个翻译批次发一次审校请求，不是每段一次。
 
 ## F 风险
 
