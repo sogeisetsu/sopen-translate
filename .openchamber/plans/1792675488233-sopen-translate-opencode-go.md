@@ -55,6 +55,12 @@
 - [x] C5 `THIRD-PARTY-NOTICES.md`
 - [x] C6 验收 C：三套命令全绿 + 四个真机页面手工验收 + `build:glossary` 幂等（2026-10-23 完成，记录见 C6 末尾）
 - [x] D1 收尾：`manifest.json` 版本 0.2.0，README / AGENTS.md / package.json 同步
+- [x] **E2 关闭思考（2026-10-23 追加）**：按预设/模型映射 reasoning-off 参数，400 自动回退并记住
+- [ ] E1 设置与类型：`translateScope`（`viewport` / `whole`）
+- [ ] E3 视口判定：`getBoundingClientRect` + 500px 余量，按父元素分组缓存
+- [ ] E4 续翻调度：scroll / resize / MutationObserver / visibilitychange，防重复
+- [ ] E5 UI 与状态：popup 范围切换、动态进度、toast 文案
+- [ ] E6 验收：假 DOM + 四页真机（首屏时间 / 滚动覆盖率 / 还原）
 
 ---
 
@@ -1179,8 +1185,8 @@ Wikipedia 用 OpenCode Go 实跑，记录耗时与是否触发熔断。
 | GitHub issue 双语（4 路段） | 63s | **30s** | 0 失败 |
 | linux.org 纯译文（4 路段） | 21s | **18s** | 0 失败 |
 | linux.org 双语（4 路段） | 21s | **9s** | 0 失败 |
-| Wikipedia 纯译文（最终 8 路段） | 25 分钟只到 1891/4128 | **244s 完整跑完**（translated 2774） | 0 失败、未熔断 |
-| Wikipedia 双语（8 路段） | 限流中断，未跑完 | **190s 完整跑完**（translated 675） | 0 失败、未熔断 |
+| Wikipedia 纯译文（最终 8 路段） | 25 分钟只到 1891/4128 | **244s → 关闭思考后 142s**（translated 2616） | 0 失败、未熔断 |
+| Wikipedia 双语（8 路段） | 限流中断，未跑完 | **190s → 关闭思考后 48s**（translated 675） | 0 失败、未熔断 |
 | Wikipedia 纯译文（DeepL，最终策略） | 170s（串行） | **21s**（translated 3149） | 0 失败 |
 
 - 请求数：Wikipedia 纯译文由 207 批降到约 11 批；双语由 35 批降到约 3 批。
@@ -1444,6 +1450,105 @@ Modified: extracted ASCII term fragments from zh-cn glossary titles only.
   - 补“content.js 不能 import”仍然有效。
 - `package.json`：只加 scripts，不加依赖。
 - `THIRD-PARTY-NOTICES.md` 入库。
+
+---
+
+# 阶段 E：视口优先 + 滚动续翻（2026-10-23 追加）
+
+目标：点翻译后先翻当前视口（含 500px 余量），让用户立刻看到译文；滚动时继续翻新进入视口的内容。
+不重复翻、不影响还原，并保留「整页」模式作为回退。
+
+## E0 决策
+
+| 主题 | 决策 | 理由 |
+| --- | --- | --- |
+| 默认范围 | `viewport`（视口 + 500px）；popup 可切「整页」 | 解决“打开后长时间没反应”；整页仍可显式选择 |
+| 续翻触发 | scroll / resize 节流 200ms + SPA `MutationObserver` 防抖 500ms | 覆盖普通滚动与懒渲染页面 |
+| 重复保护 | 每次运行一个 `Set`/`WeakSet`；成功后才标记，失败可重试 | 避免漏翻与重复计费 |
+| 进度 | 初次只统计视口段，后续发现的新段累加 total | 不假装整页完成 |
+| 隐藏标签页 | `visibilitychange` 暂停，重新可见补扫一次 | 不在后台烧 token |
+| 思考开关 | 翻译请求默认关闭思考；按预设/模型映射，400 回退并记住 | LLM 翻译不需要 chain-of-thought |
+| 与整页关系 | `scope='whole'` 走现有一次性整页逻辑 | 回退与对照，不改已验证路径 |
+
+## E1 设置与类型
+
+- `Settings.translateScope: 'viewport' | 'whole'`，默认 `viewport`；`normalizeSettings` 补默认，**不新增 schemaVersion**。
+- popup 增加范围切换（两个按钮 + `aria-pressed`），`saveSettings({ translateScope })`；翻译中禁用。
+- content 每次翻译开始时读 `settings.translateScope`（与 displayMode 同一次存储读取）。
+- `types.d.ts`、`README.md`、`AGENTS.md` 同步。
+
+## E2 关闭思考（已实施）
+
+现状：请求体原本只有 `temperature: 0`，没有 reasoning 控制字段；OpenCode Go 默认输出
+`reasoning_content`。实测 2 段请求：**2903ms / 114 思考 token → 1285ms / 0**。
+Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译文 **244s → 142s**，
+双语 **190s → 48s**，均 0 失败。
+
+| 预设 | 关闭参数 | 强制思考（不发） |
+| --- | --- | --- |
+| OpenCode Go | `reasoning_effort: "none"`（deepseek 实测） | `glm-5.3*`、`kimi-k3` |
+| OpenAI | `reasoning_effort: "none"` | `gpt-6.1-sol` / `gpt-6-astra`（400 回退） |
+| DeepSeek | `thinking: { type: "disabled" }` | — |
+| Kimi | `thinking: { type: "disabled" }` | `kimi-k3` |
+| 智谱 | `thinking: { type: "disabled" }` | `glm-5.3*` |
+| 阿里百炼 | `enable_thinking: false` | 个别模型（400 回退） |
+| MiniMax | `thinking: { type: "disabled" }` | `MiniMax-M3.1-Flash` |
+| OpenRouter | `reasoning: { enabled: false }` | 强制思考模型（400 回退） |
+| 硅基流动 | `enable_thinking: false` | 个别模型（400 回退） |
+| 商汤 | `reasoning: { enabled: false }` | 实测三种字段均被忽略，无效也无害 |
+
+实现：
+- `lib/reasoning.js`：`reasoningOffParams(presetId, model)` 纯函数，按预设 + 模型正则返回字段或 `null`。
+- `protocols.js` 的 `openai-chat` 合并字段；400/404/422 时**先只去掉思考字段**（保留 `response_format`），
+  仍失败才去掉 `response_format`；失败的配置记入模块级 Set，后续批次不再发。
+- 自定义协议不在预设内：Anthropic 默认无 thinking；Gemini 的 `thinkingConfig` 需要按模型区分，暂不自动加。
+
+## E3 视口判定
+
+- `isInViewport(el, margin = 500)`：`getBoundingClientRect()` 与视口相交即命中；rect 全 0（未布局/隐藏）视为不可见。
+- 纯译文：按文本节点的父元素判定；同一父元素的多个文本节点共享一次 rect（按 parent 分组缓存）。
+- 双语：块元素直接判定。
+- 视口外候选保留在未处理集合，滚动时再判定，不做一次性全量布局读取。
+
+## E4 续翻调度
+
+- 状态：`state.scope`、`state.seenNodes` / `state.seenBlocks`、`state.observers`、`state.pendingScan`、`state.paused`。
+- 初次：只对视口候选分批，复用 `batchNodes` / `batchSegments`、`runPool`、失败补跑与熔断。
+- 初次完成后安装 scroll（passive、rAF/200ms 节流）、resize、`MutationObserver`（childList/subtree，500ms 防抖）、`visibilitychange`。
+- 滚动触发时：已有任务在跑就置 `pendingScan=true`，当前任务结束再扫；否则立即扫描并翻译新增。
+- 页面隐藏时暂停调度；重新可见补扫一次。
+- 还原/重新翻译：`disconnect()` 所有观察器、清空 Set 与 progress。
+- 防重复：入队前查 Set；翻译成功后才标记，失败的下次仍可重试。
+- 上限：续翻批次仍受 429 退避与连续 3 批熔断约束；不做无限重试。
+
+## E5 UI 与状态
+
+- `page.status` 增加 `scope`、`pending`（是否还有未处理的可视候选）。
+- toast：首屏完成 → `已翻译可视区域 N 段，滚动继续翻译`；续翻中 → `翻译中（滚动）N/M…`。
+- popup：范围切换 + 现有进度；`translated > 0` 仍显示「还原」。
+- 整页模式：toast/进度保持现有行为。
+
+## E6 验收
+
+- 假 DOM / 单测：
+  1. 只有 rect 命中的节点被翻；视口外不翻。
+  2. 模拟 scroll 后新节点被翻，已翻节点不重复。
+  3. `scope='whole'` 仍一次翻完（回归）。
+  4. 还原后观察器断开，再滚动不再发请求。
+  5. `visibilitychange` 隐藏时暂停。
+- 真机：`opencode.ai/go` + Wikipedia：
+  - 记录首屏完成时间与滚到底后的覆盖率；
+  - 首屏明显快于整页（LLM 目标 ≤ 整页的 1/3；DeepL ≤ 5s）；
+  - 滚到底后覆盖与整页模式相当，还原后 span/文本复原。
+- 思考开关：同一批 200 段对比开关前后耗时，记录在 B6/E 验收里。
+
+## E 风险
+
+- `getBoundingClientRect` 在几千节点上可能触发布局抖动：按父元素分组缓存 + 滚动节流。
+- 懒加载/虚拟列表：未渲染内容 rect 为 0，滚动时再取；SPA 重渲染会丢 span（既有风险）。
+- 无限滚动页面会持续产生任务：靠熔断与隐藏暂停兜底。
+- 进度 total 动态增长，文案不能写成严格百分比。
+- 思考关闭字段不是所有网关都认：必须保留 400 回退与“失败即记住”。
 
 ---
 

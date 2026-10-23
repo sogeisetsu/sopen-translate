@@ -11,7 +11,19 @@
 
 import { ProviderError, clip, fail, joinUrl, postJson } from './http.js';
 import { parseSegments } from './segments.js';
+import { reasoningOffParams } from './reasoning.js';
 import { buildRepairSystemPrompt, buildSystemPrompt, buildUserPayload } from './prompt.js';
+
+/** 已经证明不支持思考开关的配置（preset|baseUrl|model），避免每批都 400 一次 */
+const reasoningUnsupported = new Set();
+
+/**
+ * @param {{ presetId?: string, baseUrl?: string, model?: string }} config
+ * @returns {string}
+ */
+function reasoningKey(config) {
+  return `${config.presetId || ''}|${config.baseUrl || ''}|${config.model || ''}`;
+}
 
 /**
  * @param {Record<string, string> | undefined} extraHeaders
@@ -59,6 +71,7 @@ const openaiChat = {
   buildRequest(args) {
     const url = joinUrl(args.config.baseUrl, '/chat/completions');
     const headers = llmHeaders(args);
+    /** @type {Record<string, any>} */
     const body = {
       model: args.config.model,
       temperature: 0,
@@ -67,6 +80,11 @@ const openaiChat = {
         { role: 'user', content: buildUserPayload(args.texts) },
       ],
     };
+    // 翻译不需要思考；只对支持的模型发字段，强制思考的模型直接不发
+    const reasoning = reasoningOffParams(args.config.presetId, args.config.model);
+    if (reasoning && !reasoningUnsupported.has(reasoningKey(args.config))) {
+      Object.assign(body, reasoning);
+    }
     return { url, headers, body };
   },
   parseResponse(json) {
@@ -76,6 +94,11 @@ const openaiChat = {
     const request = openaiChat.buildRequest(args);
     const body = /** @type {Record<string, any>} */ (request.body);
     const retryDelays = args.retry?.delays;
+    const reasoning = reasoningOffParams(args.config.presetId, args.config.model);
+    const reasoningApplied = reasoning
+      ? Object.keys(reasoning).some((field) => field in body)
+      : false;
+
     try {
       const data = await postJson(request.url, {
         headers: request.headers,
@@ -85,6 +108,31 @@ const openaiChat = {
       return openaiChat.parseResponse(data);
     } catch (err) {
       if (!isJsonModeRejection(err)) throw err;
+
+      // 先只去掉思考字段，尽量保留 response_format
+      if (reasoningApplied && reasoning) {
+        reasoningUnsupported.add(reasoningKey(args.config));
+        const withoutReasoning = { ...body };
+        for (const field of Object.keys(reasoning)) delete withoutReasoning[field];
+        try {
+          const data = await postJson(request.url, {
+            headers: request.headers,
+            body: { ...withoutReasoning, response_format: { type: 'json_object' } },
+            retryDelays,
+          });
+          return openaiChat.parseResponse(data);
+        } catch (err2) {
+          if (!isJsonModeRejection(err2)) throw err2;
+          const data = await postJson(request.url, {
+            headers: request.headers,
+            body: withoutReasoning,
+            retryDelays,
+          });
+          return openaiChat.parseResponse(data);
+        }
+      }
+
+      // 没有思考字段：只回退 response_format
       const data = await postJson(request.url, {
         headers: request.headers,
         body,

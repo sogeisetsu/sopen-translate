@@ -14,6 +14,7 @@ import { getProviderType, translateBatch } from '../extension/lib/providers.js';
 import { loadModelList, parseModelList, resolveModelsUrl } from '../extension/lib/models.js';
 import { migrateSettings } from '../extension/lib/settings.js';
 import { compileGlossary, matchTerms, modelTokens } from '../extension/lib/glossary.js';
+import { reasoningOffParams } from '../extension/lib/reasoning.js';
 
 let failures = 0;
 
@@ -453,6 +454,118 @@ await test('截断自适应：分段数不符时二分重试并保持顺序', as
 
   assert.deepEqual(result.translations, ['译:first text', '译:second text']);
   assert.equal(calls, 3, '1 次整批 + 2 次二分');
+});
+
+await test('思考开关：按预设/模型映射，强制思考的不发字段', async () => {
+  assert.deepEqual(reasoningOffParams('opencode-go', 'deepseek-v4.1-flash'), {
+    reasoning_effort: 'none',
+  });
+  assert.equal(reasoningOffParams('opencode-go', 'glm-5.3'), null);
+  assert.equal(reasoningOffParams('opencode-go', 'kimi-k3'), null);
+  assert.deepEqual(reasoningOffParams('deepseek', 'deepseek-flash'), {
+    thinking: { type: 'disabled' },
+  });
+  assert.equal(reasoningOffParams('kimi', 'kimi-k3'), null);
+  assert.deepEqual(reasoningOffParams('kimi', 'kimi-k2.6'), {
+    thinking: { type: 'disabled' },
+  });
+  assert.equal(reasoningOffParams('zhipu', 'glm-5.3'), null);
+  assert.deepEqual(reasoningOffParams('zhipu', 'glm-5.2'), {
+    thinking: { type: 'disabled' },
+  });
+  assert.equal(reasoningOffParams('minimax', 'MiniMax-M3.1-Flash'), null);
+  assert.deepEqual(reasoningOffParams('minimax', 'MiniMax-M3'), {
+    thinking: { type: 'disabled' },
+  });
+  assert.deepEqual(reasoningOffParams('dashscope', 'qwen3.8-flash'), { enable_thinking: false });
+  assert.deepEqual(reasoningOffParams('openrouter', 'openrouter/auto'), {
+    reasoning: { enabled: false },
+  });
+  assert.deepEqual(reasoningOffParams('siliconflow', 'deepseek-ai/DeepSeek-V4-Flash'), {
+    enable_thinking: false,
+  });
+  assert.deepEqual(reasoningOffParams('sensenova', 'sensenova-6.8-flash-lite'), {
+    reasoning: { enabled: false },
+  });
+  assert.equal(reasoningOffParams('custom', 'm'), null);
+});
+
+await test('openai-chat：OpenCode Go 请求体带 reasoning_effort=none', async () => {
+  const calls = stubOpenAI(plainContent);
+  await translateBatch({
+    texts: ['a'],
+    config: {
+      id: 'r',
+      presetId: 'opencode-go',
+      protocol: 'openai-chat',
+      baseUrl: 'https://api.test/reasoning-body',
+      model: 'deepseek-v4.1-flash',
+      apiKey: 'k',
+    },
+    target: '中文',
+    targetCode: 'ZH',
+  });
+  assert.equal(calls[0].body.reasoning_effort, 'none');
+});
+
+await test('思考字段被 400 时：先只去掉它，并记住该配置', async () => {
+  const calls = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push(body);
+    if (body.reasoning_effort) return new Response('unsupported', { status: 400 });
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: plainContent(body) } }] }),
+      { status: 200 },
+    );
+  };
+  const config = {
+    id: 'r',
+    presetId: 'opencode-go',
+    protocol: 'openai-chat',
+    baseUrl: 'https://api.test/reasoning-fallback',
+    model: 'deepseek-test',
+    apiKey: 'k',
+  };
+
+  const first = await translateBatch({ texts: ['a'], config, target: '中文', targetCode: 'ZH' });
+  assert.deepEqual(first.translations, ['译:a']);
+  assert.equal(calls.length, 2, '1 次带思考 + 1 次去掉思考');
+  assert.equal(calls[0].reasoning_effort, 'none');
+  assert.equal(calls[1].reasoning_effort, undefined);
+  assert.ok(calls[1].response_format, '去掉思考时仍应保留 response_format');
+
+  // 同一个配置的下一批不应再发思考字段
+  const before = calls.length;
+  await translateBatch({ texts: ['b'], config, target: '中文', targetCode: 'ZH' });
+  assert.equal(calls.length, before + 1);
+  assert.equal(calls[calls.length - 1].reasoning_effort, undefined);
+});
+
+await test('思考开关：http.js 的 429 重试不受影响', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response('rate limited', { status: 429 });
+  };
+  await assert.rejects(
+    translateBatch({
+      texts: ['a'],
+      config: {
+        id: 'r',
+        presetId: 'opencode-go',
+        protocol: 'openai-chat',
+        baseUrl: 'https://api.test/reasoning-429',
+        model: 'deepseek-test',
+        apiKey: 'k',
+      },
+      target: '中文',
+      targetCode: 'ZH',
+      retry: { delays: [0, 0, 0] },
+    }),
+    /HTTP 429/,
+  );
+  assert.equal(calls, 4);
 });
 
 /* ------------------------------ 术语保护 ------------------------------ */
