@@ -25,7 +25,7 @@
   white-space: pre-line;
 }
 
-.sopen-toast {
+#sopen-translate-ui .sopen-toast {
   position: fixed;
   right: 20px;
   bottom: 20px;
@@ -38,6 +38,6 @@
   box-shadow: 0 4px 14px rgb(0 0 0 / 24%);
 }
 
-.sopen-toast.is-error {
+#sopen-translate-ui .sopen-toast.is-error {
   background: rgb(207 34 46 / 94%);
 }
