@@ -29,7 +29,7 @@ extension/              # chrome://extensions 里直接加载这个目录
   lib/
     settings.js         # chrome.storage.local 读写、schema 迁移、sessionId
     languages.js        # 目标语言唯一来源（10 项）
-    provider-presets.js # 12 个内置预设 + custom
+    provider-presets.js # 15 个内置预设 + custom
     protocols.js        # 7 种协议的 URL / 鉴权 / 请求体 / 响应解析
     providers.js        # translateBatch：等长校验 + 术语注入 + 译后校验；reviewTranslations：审校层
     http.js             # 超时、429 退避、ProviderError
@@ -74,7 +74,7 @@ npm run build:glossary -- --check   # 校验入库词库与源文件一致
 | OpenCode Go | OpenAI Chat | 已实测（需要 `x-opencode-session`，扩展自动带上） |
 | 商汤 SenseNova | OpenAI Chat | 已实测（RPM 较低，自动退避重试） |
 | DeepL | DeepL | 已实测（不支持术语保护） |
-| Microsoft Edge 翻译 | Microsoft Edge | 接口直接请求已实测（无需 key）；扩展内待真机 |
+| Microsoft Edge 翻译 | Microsoft Edge | 已实测（无需 key；四页扩展内跑通） |
 | Microsoft Azure Translator | Microsoft Azure | 接口未实测（需要 key + Region） |
 | Index-Translate（本地代理） | OpenAI Chat | 接口未实测（需要本地代理，浏览器直连会 412） |
 | OpenAI | OpenAI Chat | 接口未实测 |

@@ -7,11 +7,10 @@
 
 ## 执行入口（2026-10-23，新会话先读这里）
 
-**已完成**：阶段 A、B（含 B6）、C、D，以及 E1–E6（E2 关闭思考含在内）。仓库版本 `0.2.0`，
-`check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
-**剩余工作只有**：F1–F5（微软翻译 + 可选 AI 定点修正，在 `feat/microsoft-translator` 分支上）。
-G1/G2（Google 免费接口 / 设备端 Translator API）是**可选实验**，排在 F 之后；G2 先 spike，通过再接入。
-**不要重做 A–E**；它们的细节是历史记录，只在新改动碰到时查阅。
+**已完成**：阶段 A、B（含 B6）、C、D，E1–E6（E2 关闭思考含在内），以及 F1–F5（微软翻译 + 可选审校）。
+仓库版本 `0.2.0`，`check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
+**剩余工作只有**：G1/G2（Google 免费接口 / 设备端 Translator API）——**可选实验**，G2 先 spike，通过再接入；不通过就只记录结论。
+**不要重做 A–F**；它们的细节是历史记录，只在新改动碰到时查阅。
 
 ### 施工顺序与分支（硬约束）
 
@@ -107,12 +106,12 @@ Edge 是内部接口，Index-Translate 是公网免费接口，都可能随时�
 - [x] E4 续翻调度：scroll / resize / MutationObserver / visibilitychange，防重复
 - [x] E5 UI 与状态：popup 范围切换、动态进度、toast 文案
 - [x] E6 验收：假 DOM + 四页真机（首屏时间 / 滚动覆盖率 / 还原）
-- [ ] F1 微软翻译：`microsoft-edge`（无 key）+ `microsoft-azure`（可选）+ 语言码映射
-- [ ] F1c B 站 Index-Translate（免费）：本地代理预设 + 公网直连 412 说明
-- [ ] F2 规则筛可疑段：术语 / 空译 / 长度比 / 脚本 / 占位符 / 重复
-- [ ] F3 可选 AI 定点修正：第二 provider，只审可疑段、返回修正译文
-- [ ] F4 设置页：微软 `region` + 「审校服务」下拉 + 隐私说明
-- [ ] F5 验收：Edge 免费接口四页 A/B；Azure 有 key 再补；收益不足就不上审校层
+- [x] F1 微软翻译：`microsoft-edge`（无 key）+ `microsoft-azure`（可选）+ 语言码映射
+- [x] F1c B 站 Index-Translate（免费）：本地代理预设 + 公网直连 412 说明
+- [x] F2 规则筛可疑段：术语 / 空译 / 长度比 / 脚本 / 占位符 / 重复
+- [x] F3 可选 AI 定点修正：第二 provider，只审可疑段、返回修正译文
+- [x] F4 设置页：微软 `region` + 「审校服务」下拉 + 隐私说明
+- [x] F5 验收：Edge 免费接口四页 A/B；Azure 有 key 再补；收益不足就不上审校层
 - [ ] G1 Google 免费网页接口（本机网络不可达，仅实现 + stub）
 - [ ] G2 设备端 `Translator` API spike（通过再接入）
 
@@ -1764,6 +1763,39 @@ UX 优先的做法：**Edge 内部接口做默认零配置**；Index-Translate �
   - 记录首屏时间、总耗时、请求数、MT 字符数、LLM token、送审段数、修正段数、术语保留率；
   - 人工抽检 20 段：修正是否真的更好；如果修正率/收益低于阈值，**不上审校层**。
 - 回归：`check` / `smoke` / `smoke:dom` / 词库 `--check` 全绿；现有 provider 不受影响。
+
+### F5 验收记录（2026-10-23）
+
+环境与 E6 相同：Edge 157 headless + 未打包 `extension/`；微软 Edge 接口无需 key；审校用 OpenCode Go `deepseek-v4.1-flash`（key 只从 OpenChamber 环境变量读入内存）。
+
+**Edge MT 四页（纯译文 / viewport，滚动到 pending=false）**
+
+| 页面 | 首屏 | 首屏段数 | 滚动后 | 还原 |
+| --- | --- | --- | --- | --- |
+| `opencode.ai/go` | 2.2s | 24 | 155/155 | 2650→2650 |
+| GitHub issue #55772 | 1.6s | 140 | 211/211 | 3138→3221（SPA +83） |
+| `linux.org/pages/download` | 0.7s | 24 | 66/66 | 1500→1500 |
+| `en.wikipedia.org/wiki/Linux` | 1.8s | 217 | 662/662 | 77649→77649 |
+
+- 四页均 `failed 0`，`p/li/td` 数量不变，还原后 `.sopen-translated-block` 为 0。
+- 请求 URL 带 `to=zh-Hans`，没有 Authorization / key / region 头；body 是纯字符串数组。
+
+**A/B（Wikipedia 首屏，MT only vs MT + 审校）**
+
+| 指标 | MT only | MT + 审校 |
+| --- | --- | --- |
+| 首屏耗时 | 1.8s | 4.45s |
+| 送审段数 | — | 46（`truncated: false`） |
+| 修正段数 | — | 5 |
+| 失败 | — | `false` |
+
+- 审校把首屏增加约 2.6s，修正 5/46，收益有限。结论：**审校保持可选（默认 `reviewProviderId = null`），不设为默认层**；符合 F5「收益不足不上审校层」。
+- `opencode.ai/go` 的 A/B：MT only 2.2s；MT + 审校 3.2s，送审 2 段、修正 0；该页 MT 本身已保留型号，审校没有收益。
+- Azure：没有 key，未真机；协议、region/key 头、body 形状由 `npm run smoke` 覆盖，预设仍标「接口未实测」。
+- Index-Translate：只加了本地代理预设，没有跑代理；公网直连 412 的说明写在 hint 与 README。
+- 回归：`check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
+
+**实现取舍**：审校响应使用「与可疑段等长的字符串数组、按顺序对齐」，没有采用计划里的 `{index, corrected}` 对象：这样直接复用协议层 `{segments:[...]}` 契约，模型改号 / 漏项也不会把译文写错位置；校验不过的条目一律丢弃。语义与 F3 一致。
 
 ## F 风险
 

@@ -168,8 +168,8 @@ export const PROVIDER_PRESETS = [
     models: [],
     supportsModelList: false,
     requiresKey: false,
-    verified: false,
-    hint: '无需 key；Edge 浏览器内置翻译接口，可能失效/限流。页面文本会发给微软。',
+    verified: true,
+    hint: '无需 key；Edge 内置翻译接口，四个验收页已实测。无 SLA，可能失效/限流；页面文本会发给微软。',
   },
   {
     id: 'microsoft-azure',

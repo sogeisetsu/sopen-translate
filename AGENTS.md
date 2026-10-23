@@ -89,7 +89,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 ## 计划与本地工具
 
-- `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md` 是施工图与验收记录。**阶段 E 的视口优先 / 滚动续翻、阶段 F 的微软翻译尚未实现**；E2（关闭思考）已落地。
+- `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md` 是施工图与验收记录。阶段 A–F 均已落地（含 E 的视口优先 / 滚动续翻、F 的微软翻译 + 可选审校）；G1/G2 是可选实验，尚未实现。
 - `.agents/` 与 `skills-lock.json` 是本地安装的 agent skill（含 `chrome-extensions`），已 gitignore，不要提交。
 - 参考 KISS Translator 时只借鉴思路 / 默认值；它是 **GPL-3.0**，不要复制源码、prompt、资源，也不要作为依赖引入。
 
