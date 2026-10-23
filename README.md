@@ -1,216 +1,287 @@
 # sopen-translate
 
-一个轻量的浏览器翻译插件：整页翻译，翻译能力由你自己配置的 API 密钥驱动，可接入多种翻译服务。
+轻量网页整页翻译扩展：**先翻当前视口，滚动继续补翻**；翻译服务与 API 密钥由你自己配置，密钥只留在本机浏览器。
 
-- 纯译文 / 双语两种展示模式，随时可还原
-- 视口优先：先翻当前视野，滚动继续补翻；也可切「整页」一次翻完
-- 术语保护：品牌、产品、型号名不被翻译（可内置词库 + 自定义词表）
-- 16 个内置服务预设 + 自定义，模型列表可联网刷新
-- API 密钥保存在浏览器本地，不上传、不同步、不进仓库
+- **视口优先**：首屏先出译文，滚动、窗口变化、SPA 新内容自动补翻；也能切「整页」一次翻完
+- **术语保护**：品牌 / 型号 / 协议名保持原文，内置词库 + 自定义词表 + 三档漏词策略
+- **纯译文 / 双语**：随时还原，双语只往块内末尾追加 `span`，不破坏表格与列表
+- **18 个内置服务预设**：LLM、DeepL、微软、Google 免费接口、NVIDIA Riva，全部可自定义
+- **可选异步审校**：主译文先渲染，规则筛出的可疑段随后交给第二个 LLM 修正，可查看 diff、可撤销
+- **无后端、无打包、无运行时依赖**：`extension/` 目录就是可加载产物
 
-## 设计约束
+![设置页](docs/images/options.png)
 
-- Manifest V3，只针对 Chrome / Edge，不做 Firefox 兼容
-- 无后端、无打包步骤：源码目录就是可加载的扩展，纯 ES module + 原生 DOM
-- 无运行时依赖；npm 只用来跑类型检查与冒烟测试，不参与扩展加载
-- 密钥只存 `chrome.storage.local`，只有 service worker 读取，content script 拿不到
-- 出网只发生在 service worker 里，content script 只负责 DOM
+<p align="center">
+  <img src="docs/images/popup.png" alt="工具栏弹窗" width="360" />
+</p>
 
-## 目录
+## 快速开始
 
-```
-extension/              # chrome://extensions 里直接加载这个目录
-  manifest.json
-  background.js         # service worker：消息路由 + 唯一的出网口
-  content.js            # 视口优先/整页翻译、双语渲染、滚动续翻、还原、进度（无 import，classic script）
-  content.css           # 浮层样式；.sopen-translated-block 是唯一的作用域例外
-  popup.html/js/css     # 工具栏弹窗：翻译/还原、模式、语言、进度
-  options.html/js/css   # 设置页：服务预设、模型、术语表、语言、关于
-  lib/
-    settings.js         # chrome.storage.local 读写、schema 迁移、sessionId
-    languages.js        # 目标语言唯一来源（10 项）
-    provider-presets.js # 16 个内置预设 + custom
-    protocols.js        # 8 种协议的 URL / 鉴权 / 请求体 / 响应解析
-    providers.js        # translateBatch：等长校验 + 术语注入 + 译后校验；reviewTranslations：审校层
-    http.js             # 超时、429 退避、ProviderError
-    segments.js         # 模型返回解析
-    prompt.js           # 各协议共用的 system / repair prompt
-    models.js           # 模型列表 URL 推导、解析与回退
-    glossary.js         # 术语匹配与校验（纯函数）
-    review.js           # 审校规则筛可疑段、修正校验（纯函数）
-    glossary-data.json  # 内置词库（构建产物，由 build:glossary 生成）
-scripts/
-  smoke.mjs             # provider / 协议 / 术语 / 迁移冒烟
-  dom-smoke.mjs         # content script 状态机冒烟（假 DOM）
-  build-glossary.mjs    # 离线生成内置词库
-  build-glossary-snapshot.mjs  # 维护者手动刷新上游快照（联网）
-  glossary-allowlist.txt / glossary-blocklist.txt / glossary-snapshot.json
-```
+1. 打开 `chrome://extensions`（Edge 用 `edge://extensions`），开启「开发者模式」
+2. 「加载已解压的扩展程序」，选择仓库里的 `extension/` 目录
+3. 首次安装会自动打开设置页：
+   - 选一个预设（没有 key 可先用 **Microsoft Edge 翻译**，无需密钥）
+   - 填 API Key → 点「刷新」拉模型 → 点「测试」确认连通 → 保存
+4. 点工具栏图标 → 「翻译」；再点「还原」回到原文
 
-仓库根另有 `tsconfig.json`、`types.d.ts`（只给 `checkJs` 静态检查用）和 `THIRD-PARTY-NOTICES.md`。
+> 设置页每个容易困惑的字段旁边都有 **圈 i**：鼠标悬停、键盘聚焦或点击即可看解释，`Esc` 或点别处关闭。
 
-```
-npm install                   # 只为类型检查装 typescript + @types/chrome
-npm run check                 # tsc --noEmit，改完应当零错误
-npm run smoke                 # provider 契约冒烟：stub fetch，不联网、不需要密钥
-npm run smoke:dom             # content script 状态机：假 DOM + 双语/还原/熔断
-npm run build:glossary        # 离线生成 extension/lib/glossary-data.json
-npm run build:glossary -- --check   # 校验入库词库与源文件一致
-```
+## 功能
 
-## 安装
+### 视口优先与整页
 
-1. 打开 `chrome://extensions`，开启「开发者模式」
-2. 「加载已解压的扩展程序」，选 `extension/` 目录
-3. 首次安装会自动打开设置页，选一个预设、填密钥，保存
-4. 点工具栏图标 → 圆形主按钮「翻译」；翻完点「还原」退回原文
+- **视口优先（默认）**：只翻当前视口 + 上下 500px 余量，首屏先出译文；滚动 / 尺寸变化 / SPA 新插入内容时继续补翻，标签页隐藏时暂停。
+- **整页**：一次翻完当前页面，适合需要全文对照的场景。
+- 视口首屏与续翻会把批次再切小（≤2000 字符 / 60 段），让第一批尽快出现；整页仍按服务策略分批。
+- 进度只统计已送翻的段，滚动发现新内容时总数会增长，不要当成整页百分比。
 
-## 翻译服务
+### 纯译文与双语
 
-内置 16 个预设，另可添加「自定义」（8 种协议任选）。**标「接口未实测」的只有路由级验证，没有真 key 端到端跑过**，设置页会明确标注。
+- 纯译文直接替换文本节点；双语把译文追加到块元素内部末尾（`span` + `display:block`），不新增兄弟 `div`。
+- 只按 `p / li / h1-h6 / td / th / ...` 收集块；纯 `div` 页面会把「没有块级后代且文本 ≥40 字」的 `div / section / article / main` 当块。
+- 超过 1200 字符的块按句切开送翻，再拼回一个译文块。
+- 含代码的块（`pre / code / kbd / samp / ...`）整块跳过，避免把代码翻坏。
+- 切换模式或范围后，已翻译的页面需要先「还原」再重新翻译。
+
+### 术语保护
+
+目标是让 `DeepSeek V4.1 Flash` 不被译成「深度求索 4.1 闪电版」。
+
+- **内置词库**：797 条，来自人工 allowlist + 上游筛选快照（simple-icons、models.dev），构建时离线生成，运行时不联网。
+- **自定义词表**：一行一个词，只做「保持原文」。
+- **型号规则**：`GPT-5`、`V4.1`、`M3.1` 这类“字母 + 版本号”自动保护；`V4` / `M3` 这类短型号靠词表里的全名。
+- **三档漏词策略**：
+  - `fallback`：漏词就整段保留原文，最保守；
+  - `repair`：只重翻漏词段，仍漏才保留原文（默认）；
+  - `warn`：译文照常显示，只提示可能漏词。
+- 每批最多把 40 条命中术语注入 prompt，校验也只针对这 40 条。
+- **DeepL、微软翻译、Google 免费接口、NVIDIA Riva 没有 prompt 通道**：扩展对它们完全跳过术语层，不注入、不校验、不回退。
+
+### 审校（可选，默认关闭）
+
+审校是给 MT 兜底的一层规则 + LLM 修正，**不阻塞首屏**：
+
+1. 主翻译返回后立即渲染，同时把规则筛出的可疑段随响应带回；
+2. content 用 300–500ms 防抖把多批候选合并，主动发 `review.run`；
+3. 主译文已经在页面上，审校结果回来后才按稳定 segment id 打补丁；
+4. 页面还原 / 重新翻译会让晚到的审校响应失效（generation 校验），不会污染已还原的页面。
+
+规则先筛：术语缺失、空译 / 与原文相同、长度比异常、目标脚本不对、数字 / URL / 占位符变化、相邻段完全重复。预算按页面累计 **200 段 / 8,000 字符**，超出标记 `truncated`；失败最多退避重试一次。
+
+**只对 MT 主翻译生效**：LLM 主翻译已经走术语注入 + `repair`，不再重复审校。修正要通过二次校验才会写回 DOM：目标脚本、长度比、数字 / URL / 占位符、HTML 标签数量、术语保留；不通过的条目保留主译文并记入报告。
+
+弹窗里可以展开「审校详情」，逐条看 `原文 → 主译文 → 修正`、原因标签与拒绝原因，并「撤销本次审校」。
+
+### 模型列表
+
+- 模型下拉 + 「刷新」：调用后台 `models.list`，只有真正联网拿到的列表才写缓存；
+- 刷新失败 / 超时 / 接口没有列表时静默退回预设建议，不弹红字；
+- 也可以切「手动输入」，直接填模型 id。
+
+### 调试日志（默认关闭）
+
+真机排障用：开启后记录翻译开始 / 结束、批次失败与重试、滚动补扫、审校、还原、错误与手动备注，只写 `chrome.storage.local`。
+
+- 环形缓冲最多 **500 条 / 约 1MB**，单条超 8KB 截断；
+- 默认**不记录页面正文**；只有显式开启「记录翻译样本」才记录每段最多 120 字，并在导出文件里标记 `samples: true`；
+- 导出为 `sopen-debug-YYYYMMDD-HHmmss.json`，含版本、UA、脱敏后的设置摘要与日志；可复制或清空；
+- 导出前统一脱敏：`Authorization` / `Bearer`、`apiKey`、`api_key`、`token`、`Ocp-Apim-Subscription-Key/Region`、`DeepL-Auth-Key`、`x-opencode-session`，以及 URL query 里的 `key=`；
+- 入口：设置页底部「调试」卡片，或弹窗底部「调试日志」链接。
+
+## 翻译服务与协议
+
+内置 **18 个预设**，另可添加「自定义」（8 种协议任选）。设置页会标注「已验证 / 接口未实测」。
 
 | 预设 | 协议 | 验证状态 |
 | --- | --- | --- |
-| OpenCode Go | OpenAI Chat | 已实测（需要 `x-opencode-session`，扩展自动带上） |
-| 商汤 SenseNova | OpenAI Chat | 已实测（RPM 较低，自动退避重试） |
+| OpenCode Go | OpenAI Chat | 已实测（自动带 `x-opencode-session`） |
+| 商汤 SenseNova | OpenAI Chat | 已实测（RPM 较低，自动退避） |
 | DeepL | DeepL | 已实测（不支持术语保护） |
-| Microsoft Edge 翻译 | Microsoft Edge | 已实测（无需 key；四页扩展内跑通） |
-| Google 免费网页接口 | Google 免费 | 接口未实测（本机网络不可达；非官方，不做默认） |
+| Microsoft Edge 翻译 | Microsoft Edge | 已实测（无需 key；内部接口无 SLA） |
+| NVIDIA NIM · MiniMax M3.1 Flash | OpenAI Chat | 已实测（`{segments}` + `reasoning_effort=none`） |
+| NVIDIA Riva Translate | nvidia-riva | 已实测（语言对 system；1 段/请求） |
+| Google 免费网页接口 | Google 免费 | 接口未实测（本机网络不可达；非官方） |
 | Microsoft Azure Translator | Microsoft Azure | 接口未实测（需要 key + Region） |
-| Index-Translate（本地代理） | OpenAI Chat | 接口未实测（需要本地代理，浏览器直连会 412） |
-| OpenAI | OpenAI Chat | 接口未实测 |
-| DeepSeek | OpenAI Chat | 接口未实测 |
-| Kimi（中国站 / 国际站） | OpenAI Chat | 接口未实测 |
-| 智谱 GLM | OpenAI Chat | 接口未实测 |
-| 阿里百炼 | OpenAI Chat | 接口未实测 |
-| MiniMax | OpenAI Chat | 接口未实测 |
-| OpenRouter | OpenAI Chat | 接口未实测 |
-| 硅基流动 | OpenAI Chat | 接口未实测 |
+| Index-Translate（本地代理） | OpenAI Chat | 接口未实测（需要本地代理） |
+| OpenAI / DeepSeek / Kimi / 智谱 / 阿里百炼 / MiniMax / OpenRouter / 硅基流动 | OpenAI Chat | 接口未实测 |
 | 自定义 | 8 种协议任选 | 取决于你填的地址 |
 
-- **模型**：下拉 + 「刷新」按钮；刷新会调后台 `models.list`，失败/超时就退回预设建议，不弹红字。也可以切「手动输入」。
-- **自定义协议**：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`microsoft-edge`、`microsoft-azure`、`google-free`、`deepl`。
-- **本地服务**（Ollama / One-API）走「自定义」，API Key 可以留空。
-- **微软翻译**：Edge 预设走浏览器内置翻译的内部免费接口，无需 key；Azure 是官方稳定版，需要 key，区域资源还要填 `Region`。两种都会把页面文本发给微软。
-- **Index-Translate**：免费 LLM，但公网接口对浏览器/扩展返回 412，需要先在本地跑仓库提供的代理（默认 `http://127.0.0.1:8080/v1`）。
+协议清单：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`microsoft-edge`、`microsoft-azure`、`google-free`、`deepl`、`nvidia-riva`。
 
-### 加一个新服务
+### NVIDIA 两个预设
 
-改 `extension/lib/provider-presets.js`，往 `PROVIDER_PRESETS` 加一条预设；`{baseUrl}/models` 不是通用推导时补 `modelsUrl`（OpenCode Go 就是反例）。新协议才需要动 `extension/lib/protocols.js` 与 `types.d.ts`。
+- **NVIDIA NIM · LLM**：`https://integrate.api.nvidia.com/v1`，当前只验证 `minimaxai/minimax-m3.1-flash`。走完整 prompt + 术语层，`GET /v1/models` 可用，`reasoning_effort: "none"` 与 `response_format: json_object` 实测可用。
+- **NVIDIA Riva Translate**：模型 `nvidia/riva-translate-4b-instruct-v2`，专用翻译模型，**system message 必须是语言对**（如 `en-zh-cn`），不能塞术语或翻译指令。实测多行输入会被合并成一段，因此固定 **1 段/请求**；不发送 `response_format`，也不支持 JSON 输出。短段 1–8s、长段可达数十秒，超时上限 120s。
+- Riva 的源语言在卡片里选；目标语言仍是全局设置。语言对由 `rivaPair()` 映射（`ZH-HANS → zh-cn`、`ZH-HANT → zh-tw`、`ES → es-ES`、`PT → pt-BR`）。
+- 两者的 key 都只从设置页读取，只存在 `chrome.storage.local`。
 
-## 三条翻译路径（MT / LLM / DeepL）
+### 微软翻译
 
-同一套 `translate` 管线，三条路径只在「术语注入 / repair / 审校」三处分叉。橙色是这条路径的关键差异，灰色虚线表示跳过。
+- **Edge**：浏览器内置翻译的内部免费接口，无需 key；可能限流或改路径。
+- **Azure**：官方接口，需要 key；区域资源还要填 `Region`。
+- 两者都会把页面文本发给微软，且都跳过术语层。
 
-**术语注入是 LLM 专属；微软 MT 和 DeepL 没有 prompt 通道，只能靠事后审校补。** DeepL 本身也是 MT，这里按接入方式单独列出。
+### Index-Translate
+
+免费 LLM，但公网接口对浏览器 / 扩展返回 412，需要先在本地跑代理（默认 `http://127.0.0.1:8080/v1`）。
+
+## 三条翻译路径
+
+同一套 `translate` 管线，三条路径只在「术语注入 / repair / 审校」三处分叉。
 
 ```mermaid
 flowchart LR
-  subgraph MT["微软 MT（Edge / Azure）"]
+  subgraph MT["MT：微软 / DeepL / Google / Riva"]
     direction TB
-    mt1["1 收集 / 分批"] --> mt2["2 术语注入：跳过<br/>无 prompt 通道"]
-    mt2 --> mt3["3 主翻译<br/>body: [a, b]"]
-    mt3 --> mt4["4 译后校验：跳过<br/>没有词表"]
-    mt4 --> mt5["5 repair：不执行<br/>没有 prompt"]
-    mt5 --> mt6["6 审校层（可选）<br/>规则筛 → 第二个 LLM"]
+    mt1["收集 / 分批"] --> mt2["术语注入：跳过<br/>无 prompt 通道"]
+    mt2 --> mt3["主翻译"]
+    mt3 --> mt4["译后校验：跳过"]
+    mt4 --> mt5["repair：不执行"]
+    mt5 --> mt6["返回主译文 + 可疑段<br/>不阻塞渲染"]
+    mt6 --> mt7["异步审校（可选）<br/>按 id 打补丁"]
   end
 
-  subgraph LLM["大模型 LLM"]
+  subgraph LLM["LLM：OpenAI Chat / Responses / Anthropic / Gemini"]
     direction TB
-    llm1["1 收集 / 分批"] --> llm2["2 术语注入（≤40 条）<br/>写入 system prompt"]
-    llm2 --> llm3["3 主翻译<br/>system prompt 带术语"]
-    llm3 --> llm4["4 译后校验<br/>只查这 40 条"]
-    llm4 --> llm5["5 repair<br/>漏词段重发同一个 provider"]
-    llm5 --> llm6["6 审校层<br/>默认跳过（避免双倍成本）"]
-  end
-
-  subgraph DEEPL["DeepL（也是 MT）"]
-    direction TB
-    dp1["1 收集 / 分批"] --> dp2["2 术语注入：跳过<br/>本实现不接 glossary"]
-    dp2 --> dp3["3 主翻译<br/>text[] + target_lang"]
-    dp3 --> dp4["4 译后校验：跳过<br/>没有词表"]
-    dp4 --> dp5["5 repair：不执行<br/>没有 prompt"]
-    dp5 --> dp6["6 审校层（可选）<br/>候选通常比 MT 少"]
+    llm1["收集 / 分批"] --> llm2["术语注入（≤40 条）"]
+    llm2 --> llm3["主翻译"]
+    llm3 --> llm4["译后校验"]
+    llm4 --> llm5["repair 漏词段"]
+    llm5 --> llm6["审校：跳过<br/>reviewSkipped=llm-primary"]
   end
 
   classDef hot fill:#ffedd5,stroke:#ea580c,stroke-width:2px,color:#9a3412
-  classDef skip fill:#f6f8fa,stroke:#d0d7de,stroke-dasharray: 5 5,color:#57606a
-  MT ~~~ LLM
-  LLM ~~~ DEEPL
-  class llm2 hot
-  class mt2,mt4,mt5,llm6,dp2,dp4,dp5 skip
+  classDef skip fill:#f6f8fa,stroke:#d0d7de,stroke-dasharray:5 5,color:#57606a
+  class llm2,mt6,mt7 hot
+  class mt2,mt4,mt5,llm6 skip
 ```
 
-- **微软 MT / DeepL**：术语层和 `repair` 都跳过；`fallback / repair / warn` 三档对它们不生效。审校层是唯一的事后补救，但只修规则看得见的硬伤。
-- **LLM**：术语注入 → 译后校验 → `repair` 漏词段；审校层默认跳过，因为 `repair` 已经处理术语，再跑第二个模型是双倍成本。
-- **共同点**：原序等长、连续 3 批失败熔断、`pageToken` 审校预算、还原语义都不变。
+- **LLM**：术语注入 → 译后校验 → `repair` 漏词段；不再重复审校，省一次请求与同池 429 风险。
+- **MT**：术语层与 `repair` 全部跳过；异步审校是唯一的事后补救，只修规则看得见的硬伤。
+- **共同点**：原序等长、连续 3 批失败熔断、失败批补跑、`pageToken` 审校预算、还原语义都不变。
 
-## 双语模式
+### NVIDIA Riva 的单段路径
 
-- popup 里切换「纯译文 / 双语」，立即保存；已翻译的页面需要点「还原」后重新翻译生效。
-- 双语把译文追加到块元素内部末尾（`span` + `display:block`），不新增兄弟 `div`，表格列数与列表项数不变。
-- 只按 `p/li/h*/td/th/...` 收集块；纯 div 页面会把「没有块级后代且文本 ≥40 字」的 `div/section/article/main` 当块。
-- 超过 1200 字符的块按句切开分别送翻，再拼回一个译文块。
-- 含代码（`pre/code/kbd/...`）的块整块跳过，避免把代码翻坏。
+```mermaid
+flowchart LR
+  a["页面段"] --> b["content 分批<br/>≤10 段 / 批"]
+  b --> c["Riva 协议<br/>一段一请求"]
+  c --> d["system: en-zh-cn<br/>user: 原文"]
+  d --> e["响应纯文本 → 写回该段"]
+```
 
-## 翻译范围
+## 设置页与弹窗
 
-- **视口优先（默认）**：点翻译后只翻当前视口 + 上下 500px 余量，首屏先出译文；滚动、窗口尺寸变化、SPA 新插入内容时继续补翻。
-- 视口首屏和续翻会把批次再切小（≤2000 字符 / 60 段），让第一批译文尽快出现；整页模式仍按 provider 策略分批。
-- **整页**：一次性翻完整个页面，行为与旧版一致，适合对照或需要全文时使用。
-- popup 里切换范围；已翻译的页面需要「还原」后重新翻译生效。
-- 滚动补翻只处理新进入视口的候选；成功处理过的节点/块不会重复送翻，失败项会在下次滚动时重试。标签页隐藏时暂停，回到前台补扫一次。
-- 进度只统计已经送翻的段：初次是视口内的段数，后续发现新内容时 `total` 累加，不要当成整页百分比看。
+- **配置流程**：选预设 → 填 key → 刷新模型 → 测试 → 保存。测试用草稿配置直接发请求，不要求先保存。
+- 预设按「已验证 / 接口未实测 / 自定义」分组；卡片显示预设、验证状态、默认单选项。
+- API Key 支持显示 / 隐藏；必填项缺失会在字段旁标出，保存时汇总并滚动到第一个问题。
+- 底部保存栏提示未保存更改、保存中 / 成功 / 失败。
+- 弹窗（320–360px）里主按钮始终优先显示「还原」；翻译中显示进度；审校中 / 已审校状态单独一行，详情可展开。
 
-## 术语保护
+## 隐私与数据流向
 
-目标是让 `DeepSeek V4.1 Flash` 不会被译成「深度求索 4.1 闪电版」。
+- **密钥**：只存在本机 `chrome.storage.local`，只有 service worker 读取；content script 看不到，不上传、不写日志、不导出。
+- **页面文本**：发给**你当前启用的主翻译服务**。具体厂商取决于预设：
+  - LLM 预设：文本 + prompt 发给对应 API；
+  - DeepL / Azure / NVIDIA：发给对应厂商；
+  - Edge 翻译：发给微软的内部接口；
+  - Google 免费接口：发给 Google 的非官方网页接口。
+- **审校**：配置后，可疑段还会发给所选的审校服务（多一个数据流向）；只送规则筛出的段，不送整页。
+- **调试日志**：只写本机存储；不自动上传、不联网；导出文件已脱敏，默认不含页面正文。
 
-- **内置词库**：797 条，来自人工 allowlist + 上游筛选快照（simple-icons、models.dev），构建时离线生成；设置页可开关。
-- **自定义词表**：一行一个词，只做「保持原文」（不做术语 → 指定译法）。
-- **型号规则**：`GPT-5`、`V4.1`、`M3.1` 这类“字母 + 版本号”自动保护；`V4`/`M3` 这种短型号靠词表里的全名。
-- **三档策略**（设置页写清了后果）：
-  - `fallback`：漏词就整段保留原文。最保守，可能出现成片未翻译。
-  - `repair`：先只重翻漏词段，仍漏才保留原文。默认。
-  - `warn`：译文照常显示，只在结果里提示可能漏词。最流畅。
-- **DeepL、微软翻译与 Google 免费接口不支持术语保护**：它们没有 prompt 通道，扩展对它们完全跳过术语层。
-- 每批最多把 40 条命中术语注入 prompt，校验也只针对这 40 条。
+## 常见问题
 
-## 审校（可选）
+**401 / 403**
+：key 错、过期、没权限，或该 key 不属于这个 baseUrl。先看设置页「测试」的错误里的 host。
 
-目标是给 MT（DeepL / 微软）兜底，而不是把整页重发一遍。
+**429 / 熔断**
+：端点限流。扩展只对 429 做退避；连续 3 批失败会熔断并保留已翻部分。长页面优先用 DeepL / 微软 MT，或换低 RPM 的服务。
 
-- 设置页「审校服务」从已配置的 LLM 里选，默认「不审校」。
-- 主翻译完成后，规则先筛可疑段：术语缺失、空译 / 与原文相同、长度比异常、目标语种脚本不对、数字 / URL / 占位符数量变化、相邻段完全重复。
-- 每页累计最多送审 200 段 / 8,000 字符（content 每轮翻译生成一个 token，滚动续翻共用），一次 LLM 请求只返回这些段的修正；超出上限会标记 `truncated`。
-- 校验不过的修正直接丢弃，保留主译文：空串、与主译文相同、没有术语缺失时退回原文、数字/URL/占位符变化、仍漏术语；index 越界、重复或非整数的条目也不应用。
-- 审校请求失败或返回的 JSON 无法解析时不影响主译文，结果里提示「审校失败」。
-- 模型返回 `{"segments":[{"index":3,"corrected":"..."}]}`；index 必须是送审片段里的下标，只替换通过校验的条目。
-- 四页 A/B（Edge MT）：72 段送审、6 段修正（8.3%），首屏增加约 1.1–3.0s。收益有限，所以**默认不开启**，需要时在设置页手动选审校服务。
+**没有模型列表**
+：部分服务不提供 `/models`，刷新会静默退回预设建议；也可能 baseUrl 与预设不一致。可切「手动输入」。
 
-## 目标语言
+**Edge 翻译失效**
+：这是浏览器内部接口，无 SLA。改路径或限流时切 Azure / DeepL / 自定义。
 
-popup 与设置页共用 `extension/lib/languages.js` 的 10 项列表：简体中文、繁体中文、日语、韩语、英语、法语、德语、西班牙语、俄语、葡萄牙语。老用户列表外的值会保留为只读的「当前：X（不在列表）」。
+**Riva 报错或很慢**
+：确认 system 是语言对（设置页会显示预览），源语言与目标语言不能相同；Riva 是专用翻译模型，长段本来就可能数十秒。
 
-## 现状与边界
+**审校没有反应**
+：审校只对 MT 主翻译生效；LLM 主翻译会直接返回 `reviewSkipped = "llm-primary"`。另外没有可疑段时不会发请求。
 
-- 已实现：视口优先 + 滚动续翻（可切整页）、整页翻译（按 provider 策略分批、最多 8 路并发、失败批自动补跑、按 provider/模型关闭思考）、纯译文与双语、还原、多服务与预设、模型列表刷新、术语保护三档、可选 LLM 审校、进度轮询、连通性测试
-- 未实现：划词翻译、翻译缓存、快捷键、按站点开关、接口用量统计、术语 → 指定译法、全量 AI 评分
-- 已知限制：
-  - 只在顶层 frame 生效；不分段保留页面内联标签的结构
-  - 双语模式跳过含代码的块；SPA 页面需要等渲染完成再点翻译（之后新插入的内容会由视口续翻补上）
-  - 长块按句切分会丢一点跨句上下文；单句超 1200 字符时硬切
-  - 无限滚动页面会持续产生补翻任务，靠熔断与隐藏暂停兜底；进度 `total` 会随滚动增长
-  - 翻译中改目标语言：popup 会禁用相关控件，但设置页不感知，可能让同一页前后批次用不同语言
-  - 16 个预设里除 OpenCode Go / 商汤 / DeepL / Edge 接口外，其余只有路由级或 stub 验证，baseUrl / 模型名可能过期；Google 免费接口在本机网络不可达
-  - 限流端点（OpenCode Go、商汤）在超长页面上可能因 429 触发熔断，只翻一部分；长页面优先用 DeepL 或微软 MT
-  - Microsoft Edge 翻译是浏览器内部接口：无 SLA、可能限流或改路径；失效时要能切到 Azure / 自定义
-  - 审校只做规则筛出的可疑段，不保证全页质量；配置审校后页面文本会多一个数据流向
-- 行为说明：每一轮翻译都从原文出发，开始时会先撤销上一轮的译文。如果新一轮第一批就失败（例如密钥失效），页面会停在原文；其余批次失败会继续，**连续 3 批失败则熔断**，保留已翻部分。
+**页面还原后又被改了一小段**
+：正常版本不会发生——还原会清空队列并递增 generation，晚到的审校响应会被丢弃。若遇到，请开调试日志并导出给维护者。
+
+**怎么排障**
+：设置页启用「调试日志」→ 复现问题 → 写一条备注（例如“这里开始 429”）→ 导出 JSON。日志默认不含页面正文。
+
+## 开发
+
+```bash
+npm install                        # 只装 typescript + @types/chrome
+npm run check                      # tsc --noEmit，改完必须零错误
+npm run smoke                      # provider / 协议 / 术语 / 审校 / NVIDIA / 调试日志（stub fetch）
+npm run smoke:dom                  # content 状态机：渲染、还原、视口、并发、异步审校、撤销
+npm run build:glossary             # 离线生成 extension/lib/glossary-data.json
+npm run build:glossary -- --check  # 校验入库词库与源文件一致
+```
+
+目录：
+
+```text
+extension/                 # chrome://extensions 直接加载这个目录
+  manifest.json
+  background.js            # service worker：消息路由 + 唯一出网口 + 审校预算 + 调试日志写盘
+  content.js               # 渲染、视口续翻、segment id、审校队列 / 补丁 / 撤销
+  content.css              # 浮层样式；.sopen-translated-block 是唯一作用域例外
+  popup.html/js/css        # 工具栏弹窗
+  options.html/js/css      # 设置页
+  theme.css                # options / popup 共用的颜色、间距、圆角、明暗主题
+  lib/
+    settings.js            # 存储、schema 迁移、sessionId
+    languages.js           # 语言唯一来源 + DeepL/微软/Google/Riva 语言码
+    provider-presets.js    # 18 个内置预设 + custom
+    protocols.js           # 9 种协议
+    providers.js           # translateBatch + reviewTranslations
+    review.js              # 候选规则、严重度、二次校验、上下文（纯函数）
+    debug-log.js           # 日志脱敏、截断、环形缓冲、导出（纯函数）
+    http.js                # 超时、429 退避、ProviderError
+    segments.js / prompt.js / models.js / glossary.js
+    ui-tip.js              # 圈 i 提示组件
+    glossary-data.json     # 内置词库（构建产物）
+scripts/
+  smoke.mjs / dom-smoke.mjs
+  build-glossary.mjs / build-glossary-snapshot.mjs
+```
+
+关键不变量：
+
+- `translate()` / `translateBatch()` 必须原序返回等长数组，数量不符直接抛错。
+- 每轮翻译前先 `resetPage()`；`resetPage()` 必须断开观察器、清空 pending/seen/审校队列并递增 generation。
+- 审校只按 segment id 打补丁；节点断开、generation 不一致时跳过。
+- `content.js` 是 classic script，不能出现 `import`；`background.js` 是唯一读 key 与出网的地方。
+- 行为变化同步更新本文件与 `AGENTS.md`。
+
+真机测试说明：
+
+- Chrome 品牌版可能忽略 `--load-extension`；用 Edge / Chromium 加 `--load-extension` / `--disable-extensions-except`。
+- 从扩展页用 `chrome.tabs.sendMessage` 驱动；content 里发 `chrome.runtime.sendMessage` 到不了 content 自己的监听器。
+- 没有真实 key 时只跑 stub，不要声称端到端通过；Azure / Google 免费接口 / Index-Translate 目前只有 stub 或配置级验证。
 
 ## 状态
 
-`0.2.0`。自动化检查（类型、两套冒烟、词库一致性）通过；阶段 E/F 的真机与 G 的 spike 记录见 `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md`。
+`0.2.0`。已实现：视口优先与整页、纯译文与双语、还原、术语三档、9 种协议、18 个预设、模型刷新、异步审校 + diff/撤销、NVIDIA Riva / MiniMax、明暗主题与圈 i 提示、本地调试日志。
+
+尚未实现：划词 / 右键翻译、翻译缓存、快捷键、按站点开关、用量统计、术语指定译法、审校全量评分、NVIDIA 其他模型、G2 Translator API。
+
+已知限制：
+
+- 只在顶层 frame 生效；不逐段保留页面内联标签结构。
+- 双语模式跳过含代码的块；SPA 页面建议等渲染完成再点翻译。
+- 长块按句切分会丢一点跨句上下文；单句超 1200 字符硬切。
+- 无限滚动页面会持续产生补翻任务，靠熔断与隐藏暂停兜底。
+- 18 个预设中只有 OpenCode Go / 商汤 / DeepL / Edge / NVIDIA 两个预设做过真 key 端到端；其余为路由级或 stub 验证，baseUrl / 模型名可能过期。
+- 审校只修规则看得见的硬伤，不承诺语义润色；配置后页面文本会多一个数据流向。
 
 ## 许可
 
