@@ -47,8 +47,10 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 隐藏标签页暂停补翻；`page.status` 额外返回 `scope` 与 `pending`（是否还有可见未处理候选）。
 - 只有第 0 批失败立即中止；连续 3 批失败熔断，保留已翻部分。
 - 术语只校验本批注入 prompt 的 ≤40 条（`termsForPrompt`），不要拿完整词表校验。
-- DeepL 完全跳过术语层（不注入、不校验、不回退）。
-- 语言只有 `lib/languages.js` 一个来源（LLM 用 `name`，DeepL 用 `code`）。
+- DeepL 与微软 MT（`microsoft-edge` / `microsoft-azure`）完全跳过术语层（不注入、不校验、不回退）。
+- 语言只有 `lib/languages.js` 一个来源（LLM 用 `name`，DeepL 用 `code`，微软用 `ms`）。
+- 审校层只处理规则筛出的可疑段：`lib/review.js` 是纯函数，`providers.js` 的 `reviewTranslations()` 负责发一次 LLM 请求。审校失败/数量不符/校验不过一律保留主译文，不整段回退；审校服务必须是 LLM（`supportsGlossary !== false`）。
+- 修正按顺序对齐回可疑段，不依赖模型返回的 `index`。
 - `glossary-data.json` 只由 `npm run build:glossary` 生成，不手改，运行时不联网。
 - `models.list` 可以用草稿配置发请求，但只通过 `patchProvider` 把缓存写回「已保存且配置一致」的 provider。
 - 设置 schema 是 v2；迁移幂等（`ZH → ZH-HANS`）；`getSessionId()` 单独写入，不要塞进 `getSettings()`。
@@ -56,7 +58,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 ## 分批、并发、思考（2026-10 实测）
 
-- 按 provider 策略：LLM 8000 字符 / 400 段 / 8 路；DeepL 3000 / 50 / 4（50 是 DeepL 单请求上限）；商汤 6000 / 300 / 1。
+- 按 provider 策略：LLM 8000 字符 / 400 段 / 8 路；DeepL 3000 / 50 / 4（50 是 DeepL 单请求上限）；商汤 6000 / 300 / 1；微软 MT 5000 / 100 / 4（Azure 单请求上限远高于此，取保守值）。
 - 失败批在主线结束后用 2 路补跑一次，仍失败才计入 `failed`；并发下熔断可能多带最多 `并发数-1` 批。
 - 输出被截断（分段数不符 / JSON 解析失败）时自动二分重试；HTTP 401/429 不拆，避免放大请求。
 - `postJson` 默认超时 **120 秒**——400 段批次实测 28s+，30 秒会误杀。
@@ -68,10 +70,10 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 ## 加翻译服务
 
 1. 预设：`extension/lib/provider-presets.js` 的 `PROVIDER_PRESETS` 加一条（`id/label/protocol/baseUrl/models/supportsModelList/verified`）；`{baseUrl}/models` 不是通用推导时补 `modelsUrl`。
-2. 协议：现有五种（`openai-chat` / `openai-responses` / `anthropic-messages` / `google-gemini` / `deepl`）。新协议加进 `extension/lib/protocols.js` 的 `PROTOCOLS`，并补 `types.d.ts` 的 `ProtocolId`。
+2. 协议：现有七种（`openai-chat` / `openai-responses` / `anthropic-messages` / `google-gemini` / `microsoft-edge` / `microsoft-azure` / `deepl`）。新协议加进 `extension/lib/protocols.js` 的 `PROTOCOLS`，并补 `types.d.ts` 的 `ProtocolId`；MT 协议要设 `supportsGlossary: false`。
 3. 需要额外字段（如微软的 `region`）时，同时改 `ProviderConfig`、`normalizeSettings` 和设置页卡片。
 
-设置页按预设渲染，不再依赖 `PROVIDER_TYPES` / `type.fields`（那只是旧调用方的兼容入口）。**微软翻译尚未实现**，只在计划的阶段 F 里。
+设置页按预设渲染，不再依赖 `PROVIDER_TYPES` / `type.fields`（那只是旧调用方的兼容入口）。微软 Edge / Azure 已实现；Index-Translate 只提供本地代理预设。
 
 ## 验证
 
@@ -94,6 +96,8 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 - 不要给 `#sopen-translate-ui` 加 inline `all: initial`：会重置 `position` / `pointer-events`。
 - `response_format` 回退只在 400/404/422；401/403/429 直接上抛，否则一次 429 会变成 8 次请求。
+- Microsoft Edge 是浏览器内部接口：`POST /translate/translatetext?...`，body 是**纯字符串数组**，没有 Authorization；Azure 是 `[{ Text }]` + `Ocp-Apim-Subscription-Key`（区域资源还要 `Ocp-Apim-Subscription-Region`）。两者响应同形，别把 body 混用。
+- 审校服务必须是 LLM；配成 DeepL / 微软会让审校直接标记失败。审校修正按顺序对齐，不要改成依赖模型返回的 `index`。
 - 双语会跳过含 `PRE/CODE/KBD/SAMP/...` 后代的块（含内联 `<code>`），这是有意的覆盖率损失。
 - 视口判定的 rect 全 0 视为隐藏/未布局；`smoke:dom` 的假 DOM 默认给可见 rect，测视口用例时用 `offscreen(el)` 设置元素 rect。
 - `smoke:dom` 的 `window` / `document` 事件与 `MutationObserver` 都是桩：要触发续翻，用 `fireListener(windowListeners, 'scroll')` 或 `fireMutations(...)`。

@@ -48,6 +48,7 @@ const termsEl = /** @type {HTMLTextAreaElement} */ (pick('glossary-terms'));
 const enforcementEl = /** @type {HTMLSelectElement} */ (pick('enforcement'));
 const enforcementHelpEl = pick('enforcement-help');
 const glossaryMetaEl = pick('glossary-meta');
+const reviewProviderEl = /** @type {HTMLSelectElement} */ (pick('review-provider'));
 const appVersionEl = pick('app-version');
 
 const state = {
@@ -93,10 +94,24 @@ function setSaved(text, isError = false) {
 
 /* -------------------------------- 校验 -------------------------------- */
 
+/** MT 协议没有 prompt 通道：不显示模型字段，也不参与术语保护 */
+const MT_PROTOCOLS = new Set(['deepl', 'microsoft-edge', 'microsoft-azure']);
+
+/** @param {ProviderConfig} provider */
+function isMtProvider(provider) {
+  return MT_PROTOCOLS.has(provider.protocol);
+}
+
+/** @param {ProviderConfig} provider */
+function keyOptional(provider) {
+  return provider.presetId === 'custom' || getPreset(provider.presetId).requiresKey === false;
+}
+
 /**
- * 必填矩阵见计划 A6.5：
+ * 必填矩阵见计划 A6.5 / F1：
  * - 内置 LLM 预设：apiKey、model
- * - DeepL：apiKey、baseUrl
+ * - DeepL / Azure：apiKey、baseUrl（Azure 的 region 可空）
+ * - Edge：只需要 baseUrl（预设自带），没有 key / model
  * - custom + LLM：protocol、baseUrl、model（apiKey 可空）
  * - custom + deepl：protocol、baseUrl、apiKey
  * @param {ProviderConfig} provider
@@ -104,11 +119,13 @@ function setSaved(text, isError = false) {
  */
 function missingRequired(provider) {
   const isCustom = provider.presetId === 'custom';
+  const preset = getPreset(provider.presetId);
   /** @type {string[]} */
   const missing = [];
   if (!String(provider.baseUrl ?? '').trim()) missing.push('接口地址');
 
-  if (provider.protocol === 'deepl') {
+  if (provider.protocol === 'microsoft-edge') return missing;
+  if (provider.protocol === 'deepl' || provider.protocol === 'microsoft-azure') {
     if (!String(provider.apiKey ?? '').trim()) missing.push('API Key');
     return missing;
   }
@@ -116,7 +133,7 @@ function missingRequired(provider) {
   if (!String(provider.model ?? '').trim()) missing.push('模型');
   if (isCustom) {
     if (!provider.protocol) missing.push('协议');
-  } else if (!String(provider.apiKey ?? '').trim()) {
+  } else if (preset.requiresKey !== false && !String(provider.apiKey ?? '').trim()) {
     missing.push('API Key');
   }
   return missing;
@@ -276,7 +293,9 @@ function protocolField(provider, index) {
 function providerCard(provider, index) {
   const preset = getPreset(provider.presetId);
   const isCustom = provider.presetId === 'custom';
-  const isDeepl = provider.protocol === 'deepl';
+  const isMt = isMtProvider(provider);
+  const isEdge = provider.protocol === 'microsoft-edge';
+  const isAzure = provider.protocol === 'microsoft-azure';
 
   const head = h(
     'div',
@@ -304,44 +323,61 @@ function providerCard(provider, index) {
   );
 
   /** @type {HTMLElement[]} */
-  const fields = [
-    h(
-      'label',
-      { class: 'field' },
-      h('span', { text: isCustom && !isDeepl ? 'API Key（可空）' : 'API Key（必填）' }),
-      h('input', {
-        class: 'input',
-        type: 'password',
-        value: provider.apiKey ?? '',
-        placeholder: 'sk-...',
-        autocomplete: 'off',
-        spellcheck: false,
-        dataset: { index, field: 'apiKey' },
-      }),
-    ),
-  ];
-  if (!isDeepl) fields.push(modelField(provider, index, preset));
-  if (isCustom) fields.push(protocolField(provider, index));
-
-  const advanced = h(
-    'details',
-    { class: 'advanced' },
-    h('summary', { text: '高级：自定义接口地址' }),
-    h(
-      'div',
-      { class: 'grid' },
+  const fields = [];
+  if (!isEdge) {
+    fields.push(
       h(
         'label',
         { class: 'field' },
-        h('span', { text: 'baseUrl' }),
+        h('span', { text: keyOptional(provider) ? 'API Key（可空）' : 'API Key（必填）' }),
         h('input', {
           class: 'input',
-          value: provider.baseUrl ?? '',
-          placeholder: preset.baseUrl || 'https://...',
+          type: 'password',
+          value: provider.apiKey ?? '',
+          placeholder: 'sk-...',
+          autocomplete: 'off',
           spellcheck: false,
-          dataset: { index, field: 'baseUrl' },
+          dataset: { index, field: 'apiKey' },
         }),
       ),
+    );
+  }
+  if (isAzure) {
+    fields.push(
+      h(
+        'label',
+        { class: 'field' },
+        h('span', { text: 'Region（区域资源必填，global 可空）' }),
+        h('input', {
+          class: 'input',
+          value: provider.region ?? '',
+          placeholder: 'eastasia',
+          spellcheck: false,
+          dataset: { index, field: 'region' },
+        }),
+      ),
+    );
+  }
+  if (!isMt) fields.push(modelField(provider, index, preset));
+  if (isCustom) fields.push(protocolField(provider, index));
+
+  /** @type {HTMLElement[]} */
+  const advancedFields = [
+    h(
+      'label',
+      { class: 'field' },
+      h('span', { text: 'baseUrl' }),
+      h('input', {
+        class: 'input',
+        value: provider.baseUrl ?? '',
+        placeholder: preset.baseUrl || 'https://...',
+        spellcheck: false,
+        dataset: { index, field: 'baseUrl' },
+      }),
+    ),
+  ];
+  if (!isMt) {
+    advancedFields.push(
       h(
         'label',
         { class: 'field' },
@@ -354,7 +390,14 @@ function providerCard(provider, index) {
           dataset: { index, field: 'modelsUrl' },
         }),
       ),
-    ),
+    );
+  }
+
+  const advanced = h(
+    'details',
+    { class: 'advanced' },
+    h('summary', { text: '高级：自定义接口地址' }),
+    h('div', { class: 'grid' }, ...advancedFields),
   );
 
   const result = h('span', { class: 'result' });
@@ -438,12 +481,46 @@ function renderLanguages() {
   }
 }
 
+function renderReviewProviders() {
+  const draft = getDraft();
+  const current = draft.reviewProviderId;
+  const llms = draft.providers.filter((provider) => !isMtProvider(provider));
+
+  reviewProviderEl.replaceChildren();
+  reviewProviderEl.append(h('option', { value: '', text: '不审校', selected: !current }));
+
+  for (const provider of llms) {
+    const preset = getPreset(provider.presetId);
+    const label = provider.label || preset.label;
+    const detail = provider.model ? ` · ${provider.model}` : '';
+    reviewProviderEl.append(
+      h('option', {
+        value: provider.id,
+        text: `${label}${detail}`,
+        selected: provider.id === current,
+      }),
+    );
+  }
+
+  if (current && !llms.some((provider) => provider.id === current)) {
+    reviewProviderEl.append(
+      h('option', {
+        value: current,
+        text: '当前：审校服务不可用',
+        selected: true,
+        disabled: true,
+      }),
+    );
+  }
+}
+
 function renderForm() {
   const draft = getDraft();
   useBuiltinEl.checked = draft.glossary.useBuiltin;
   termsEl.value = draft.glossary.terms.join('\n');
   enforcementEl.value = draft.enforcement;
   updateEnforcementHelp();
+  renderReviewProviders();
   appVersionEl.textContent = chrome.runtime.getManifest().version;
 }
 
@@ -520,6 +597,8 @@ function applyField(target) {
   } else if (field === 'modelsUrl') {
     provider.modelsUrl = value;
     delete provider.modelsCache;
+  } else if (field === 'region') {
+    provider.region = value;
   } else if (field === 'protocol') {
     provider.protocol = /** @type {ProviderConfig['protocol']} */ (value);
   }
@@ -539,11 +618,11 @@ providersEl.addEventListener('change', (event) => {
   const field = target.dataset.field;
   const value = /** @type {any} */ (target).value;
 
-  // API Key 填到一定长度就自动拉一次模型列表，省掉一次手动点击
-  if (field === 'apiKey' && String(value ?? '').trim().length > 8) {
+  // API Key 填到一定长度就自动拉一次模型列表，省掉一次手动点击；MT 没有模型列表
+  if (field === 'apiKey' && !isMtProvider(provider) && String(value ?? '').trim().length > 8) {
     void refreshModels(Number(target.dataset.index));
   }
-  // 切到 DeepL 要隐藏模型字段，切回来要恢复
+  // 切到 MT（DeepL / 微软）要隐藏模型字段，切回来要恢复
   if (field === 'protocol') renderProviders();
 });
 
@@ -561,9 +640,12 @@ providersEl.addEventListener('click', async (event) => {
     if (draft.activeProviderId === provider.id) {
       draft.activeProviderId = draft.providers[0]?.id ?? null;
     }
+    if (draft.reviewProviderId === provider.id) {
+      draft.reviewProviderId = null;
+    }
     state.manualModel.delete(provider.id);
     state.modelNotice.delete(provider.id);
-    renderProviders();
+    renderAll();
     setSaved('已删除，记得保存');
     return;
   }
@@ -666,6 +748,7 @@ saveBtn.addEventListener('click', async () => {
         useBuiltin: useBuiltinEl.checked,
         terms: normalizeTerms(termsEl.value.split('\n')),
       },
+      reviewProviderId: reviewProviderEl.value || null,
     });
     state.stored = structuredClone(state.draft);
     renderAll();

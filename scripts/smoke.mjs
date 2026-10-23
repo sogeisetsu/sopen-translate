@@ -10,11 +10,13 @@
  */
 
 import assert from 'node:assert/strict';
-import { getProviderType, translateBatch } from '../extension/lib/providers.js';
+import { getProviderType, reviewTranslations, translateBatch } from '../extension/lib/providers.js';
 import { loadModelList, parseModelList, resolveModelsUrl } from '../extension/lib/models.js';
-import { migrateSettings } from '../extension/lib/settings.js';
+import { normalizeSettings, migrateSettings } from '../extension/lib/settings.js';
 import { compileGlossary, matchTerms, modelTokens } from '../extension/lib/glossary.js';
 import { reasoningOffParams } from '../extension/lib/reasoning.js';
+import { microsoftCode } from '../extension/lib/languages.js';
+import { findSuspicious, REVIEW_MAX_SEGMENTS } from '../extension/lib/review.js';
 
 let failures = 0;
 
@@ -750,6 +752,329 @@ await test('migrateSettings：旧 type 迁移、ZH 升级、幂等', async () =>
   const second = migrateSettings(first.settings);
   assert.equal(second.changed, false, '重复迁移必须无变化');
   assert.deepEqual(second.settings, first.settings);
+});
+
+await test('normalizeSettings：范围与审校默认值、非法值回退', async () => {
+  const empty = normalizeSettings({});
+  assert.equal(empty.translateScope, 'viewport');
+  assert.equal(empty.reviewProviderId, null);
+
+  const kept = normalizeSettings({ translateScope: 'whole', reviewProviderId: 'p2' });
+  assert.equal(kept.translateScope, 'whole');
+  assert.equal(kept.reviewProviderId, 'p2');
+
+  const bad = normalizeSettings({ translateScope: 'everything', reviewProviderId: 42 });
+  assert.equal(bad.translateScope, 'viewport');
+  assert.equal(bad.reviewProviderId, null);
+});
+
+/* ------------------------------ 微软翻译 ------------------------------ */
+
+const edgeConfig = {
+  id: 'edge',
+  presetId: 'microsoft-edge',
+  protocol: 'microsoft-edge',
+  baseUrl: 'https://edge.microsoft.com',
+};
+
+const azureConfig = {
+  id: 'azure',
+  presetId: 'microsoft-azure',
+  protocol: 'microsoft-azure',
+  baseUrl: 'https://api.cognitive.microsofttranslator.com',
+  apiKey: 'azure-key',
+  region: 'eastasia',
+};
+
+/** @param {any[]} texts @returns {string} */
+const microsoftResult = (texts) =>
+  JSON.stringify(texts.map((text) => ({ translations: [{ text: `译:${text}` }] })));
+
+await test('microsoft-edge：无鉴权头、body 是字符串数组、语言码用 zh-Hans', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: String(url), body, headers: init.headers });
+    return new Response(microsoftResult(body), { status: 200 });
+  };
+
+  const out = await translateBatch({
+    texts: ['a', 'b'],
+    config: edgeConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+  });
+
+  assert.deepEqual(out.translations, ['译:a', '译:b']);
+  assert.match(calls[0].url, /^https:\/\/edge\.microsoft\.com\/translate\/translatetext\?/);
+  assert.match(calls[0].url, /to=zh-Hans/);
+  assert.equal(calls[0].headers.Authorization, undefined);
+  assert.equal(calls[0].headers['Ocp-Apim-Subscription-Key'], undefined);
+  assert.deepEqual(calls[0].body, ['a', 'b']);
+});
+
+await test('microsoft-azure：key/region 头、Text 数组、api-version 与语言码', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: String(url), body, headers: init.headers });
+    return new Response(microsoftResult(body.map((item) => item.Text)), { status: 200 });
+  };
+
+  const out = await translateBatch({
+    texts: ['a'],
+    config: azureConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+  });
+
+  assert.deepEqual(out.translations, ['译:a']);
+  assert.match(calls[0].url, /api-version=3\.0/);
+  assert.match(calls[0].url, /to=zh-Hans/);
+  assert.equal(calls[0].headers['Ocp-Apim-Subscription-Key'], 'azure-key');
+  assert.equal(calls[0].headers['Ocp-Apim-Subscription-Region'], 'eastasia');
+  assert.deepEqual(calls[0].body, [{ Text: 'a' }]);
+});
+
+await test('微软翻译：术语层跳过（不注入、不校验、不回退）', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (_url, init) => {
+    calls.push({ url: '', body: JSON.parse(init.body), headers: init.headers });
+    return new Response(microsoftResult(['没有保留术语']), { status: 200 });
+  };
+
+  const result = await translateBatch({
+    texts: ['Kubernetes 简介'],
+    config: edgeConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+    enforcement: 'fallback',
+  });
+
+  assert.deepEqual(result.translations, ['译:没有保留术语']);
+  assert.equal(result.protected, 0);
+  assert.equal(result.warnings.length, 0);
+});
+
+await test('microsoftCode：10 种语言映射，老值原样返回', async () => {
+  assert.equal(microsoftCode('ZH-HANS'), 'zh-Hans');
+  assert.equal(microsoftCode('ZH-HANT'), 'zh-Hant');
+  assert.equal(microsoftCode('EN-US'), 'en');
+  assert.equal(microsoftCode('PT-BR'), 'pt');
+  assert.equal(microsoftCode('简体中文'), 'zh-Hans');
+  assert.equal(microsoftCode('Klingon'), 'Klingon');
+  assert.equal(microsoftCode(''), 'en');
+});
+
+/* ------------------------------ 审校规则 ------------------------------ */
+
+const noGlossary = compileGlossary([]);
+
+await test('review 规则：术语 / 空译 / 同原文 / 长度 / 脚本', async () => {
+  const term = findSuspicious({
+    sources: ['Kubernetes 简介'],
+    translations: ['简介'],
+    compiled: compileGlossary(['Kubernetes']),
+    targetCode: 'ZH-HANS',
+  });
+  assert.equal(term.items.length, 1);
+  assert.ok(term.items[0].reasons.includes('term'));
+  assert.deepEqual(term.items[0].missing, ['Kubernetes']);
+
+  const empty = findSuspicious({
+    sources: ['hello world'],
+    translations: [''],
+    compiled: noGlossary,
+    targetCode: 'ZH-HANS',
+  });
+  assert.ok(empty.items[0].reasons.includes('empty'));
+
+  const same = findSuspicious({
+    sources: ['hello world'],
+    translations: ['hello world'],
+    compiled: noGlossary,
+    targetCode: 'ZH-HANS',
+  });
+  assert.ok(same.items[0].reasons.includes('same'));
+
+  const short = findSuspicious({
+    sources: ['a'.repeat(100)],
+    translations: ['短'],
+    compiled: noGlossary,
+    targetCode: 'ZH-HANS',
+  });
+  assert.ok(short.items[0].reasons.includes('length'));
+
+  const wrongScript = findSuspicious({
+    sources: ['hello world'],
+    translations: ['hello world translated'],
+    compiled: noGlossary,
+    targetCode: 'ZH-HANS',
+  });
+  assert.ok(wrongScript.items[0].reasons.includes('script'));
+});
+
+await test('review 规则：数字 / URL / 占位符 / 相邻重复', async () => {
+  const numbers = findSuspicious({
+    sources: ['There are 3 ports and 2 hosts'],
+    translations: ['使用端口和主机'],
+    compiled: noGlossary,
+    targetCode: 'ZH-HANS',
+  });
+  assert.ok(numbers.items[0].reasons.includes('numbers'));
+
+  const url = findSuspicious({
+    sources: ['See https://example.test/docs for details'],
+    translations: ['详见文档'],
+    compiled: noGlossary,
+    targetCode: 'ZH-HANS',
+  });
+  assert.ok(url.items[0].reasons.includes('url'));
+
+  const placeholder = findSuspicious({
+    sources: ['Hello ${name}, welcome to {{site}}'],
+    translations: ['欢迎'],
+    compiled: noGlossary,
+    targetCode: 'ZH-HANS',
+  });
+  assert.ok(placeholder.items[0].reasons.includes('placeholder'));
+
+  const duplicate = findSuspicious({
+    sources: ['First paragraph', 'Second paragraph'],
+    translations: ['相同译文', '相同译文'],
+    compiled: noGlossary,
+    targetCode: 'ZH-HANS',
+  });
+  assert.equal(duplicate.items.length, 1, '只标记后一项');
+  assert.equal(duplicate.items[0].index, 1);
+  assert.ok(duplicate.items[0].reasons.includes('duplicate'));
+});
+
+await test('review 上限：最多 200 段，超出标记 truncated', async () => {
+  const sources = Array.from({ length: REVIEW_MAX_SEGMENTS + 5 }, (_, i) => `source ${i}`);
+  const translations = sources.map(() => '');
+  const found = findSuspicious({
+    sources,
+    translations,
+    compiled: noGlossary,
+    targetCode: 'EN-US',
+  });
+  assert.equal(found.items.length, REVIEW_MAX_SEGMENTS);
+  assert.equal(found.truncated, true);
+});
+
+/* ------------------------------ 审校请求 ------------------------------ */
+
+await test('review：修正可疑段，按顺序对齐并保留术语', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: '', body, headers: init.headers });
+    const payload = JSON.parse(body.messages[1].content);
+    assert.equal(payload.segments.length, 1);
+    assert.equal(payload.segments[0].source, 'Kubernetes 简介');
+    return new Response(chatResult(['Kubernetes 简介']), { status: 200 });
+  };
+
+  const result = await reviewTranslations({
+    sources: ['Kubernetes 简介'],
+    translations: ['简介'],
+    config: chatConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+  });
+
+  assert.equal(result.review.failed, false);
+  assert.equal(result.review.reviewed, 1);
+  assert.equal(result.review.corrected, 1);
+  assert.deepEqual(result.translations, ['Kubernetes 简介']);
+  assert.match(calls[0].body.messages[0].content, /JSON/);
+  assert.match(calls[0].body.messages[0].content, /审校/);
+});
+
+await test('review：空修正、无术语时同原文、仍漏术语的条目都丢弃', async () => {
+  const termArgs = {
+    sources: ['Kubernetes 简介'],
+    translations: ['简介'],
+    config: chatConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+  };
+
+  globalThis.fetch = async () => new Response(chatResult(['']), { status: 200 });
+  const empty = await reviewTranslations(termArgs);
+  assert.equal(empty.review.corrected, 0);
+  assert.deepEqual(empty.translations, ['简介']);
+
+  // 没有术语缺失时，把译文“修正”成原文等于没翻
+  globalThis.fetch = async () => new Response(chatResult(['Hello there']), { status: 200 });
+  const sameAsSource = await reviewTranslations({
+    sources: ['Hello there'],
+    translations: ['你好'],
+    config: chatConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: [],
+  });
+  assert.equal(sameAsSource.review.corrected, 0);
+  assert.deepEqual(sameAsSource.translations, ['你好']);
+
+  globalThis.fetch = async () => new Response(chatResult(['仍然没有术语']), { status: 200 });
+  const stillMissing = await reviewTranslations(termArgs);
+  assert.equal(stillMissing.review.corrected, 0);
+  assert.deepEqual(stillMissing.translations, ['简介']);
+});
+
+await test('review：请求失败或数量不符时保留主译文并标记 failed', async () => {
+  globalThis.fetch = async () => new Response('boom', { status: 500 });
+  const failed = await reviewTranslations({
+    sources: ['Kubernetes 简介'],
+    translations: ['简介'],
+    config: chatConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+  });
+  assert.equal(failed.review.failed, true);
+  assert.deepEqual(failed.translations, ['简介']);
+
+  globalThis.fetch = async () => new Response(chatResult([]), { status: 200 });
+  const mismatch = await reviewTranslations({
+    sources: ['Kubernetes 简介'],
+    translations: ['简介'],
+    config: chatConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+  });
+  assert.equal(mismatch.review.failed, true);
+  assert.deepEqual(mismatch.translations, ['简介']);
+});
+
+await test('review：审校服务配成 MT 时直接失败，不发请求', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response('{}', { status: 200 });
+  };
+  const result = await reviewTranslations({
+    sources: ['Kubernetes 简介'],
+    translations: ['简介'],
+    config: chatDeeplConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+  });
+  assert.equal(result.review.failed, true);
+  assert.equal(calls, 0);
+  assert.deepEqual(result.translations, ['简介']);
 });
 
 if (failures > 0) {

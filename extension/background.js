@@ -14,7 +14,7 @@ import {
 import { getPreset } from './lib/provider-presets.js';
 import { loadModelList, resolveModelsUrl } from './lib/models.js';
 import { normalizeTerms } from './lib/glossary.js';
-import { translateBatch } from './lib/providers.js';
+import { reviewTranslations, translateBatch } from './lib/providers.js';
 
 /** @typedef {import('../types').ProviderConfig} ProviderConfig */
 /** @typedef {import('../types').Settings} Settings */
@@ -140,11 +140,33 @@ async function translate(texts) {
     extraHeaders,
   });
 
+  // 可选审校层：主译文不动，只让第二个 LLM 修正规则筛出的可疑段。
+  let translations = result.translations;
+  /** @type {import('../types').ReviewOutcome | undefined} */
+  let review;
+  const reviewProvider = settings.reviewProviderId
+    ? settings.providers.find((p) => p.id === settings.reviewProviderId)
+    : null;
+  if (reviewProvider) {
+    const reviewed = await reviewTranslations({
+      sources: list,
+      translations,
+      config: reviewProvider,
+      target: settings.targetLang,
+      targetCode: settings.targetLangCode,
+      glossary,
+      extraHeaders: await sessionHeaders(reviewProvider),
+    });
+    translations = reviewed.translations;
+    review = reviewed.review;
+  }
+
   return {
     ok: true,
-    translations: result.translations,
+    translations,
     protected: result.protected,
     warnings: result.warnings,
+    review,
   };
 }
 

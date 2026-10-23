@@ -13,6 +13,7 @@ import { ProviderError, clip, fail, joinUrl, postJson } from './http.js';
 import { parseSegments } from './segments.js';
 import { reasoningOffParams } from './reasoning.js';
 import { buildRepairSystemPrompt, buildSystemPrompt, buildUserPayload } from './prompt.js';
+import { microsoftCode } from './languages.js';
 
 /** 已经证明不支持思考开关的配置（preset|baseUrl|model），避免每批都 400 一次 */
 const reasoningUnsupported = new Set();
@@ -47,8 +48,19 @@ function llmHeaders(args) {
 
 /** @param {ProtocolBuildArgs} args @returns {string} */
 function systemFor(args) {
+  if (args.system) return args.system;
   const terms = args.terms || [];
   return args.repair ? buildRepairSystemPrompt(args.target, terms) : buildSystemPrompt(args.target, terms);
+}
+
+/**
+ * 默认是 `{segments:[...]}`；审校层用 `system` + `userContent` 覆盖，
+ * 这样不必为审校再复制一套协议实现。
+ * @param {ProtocolBuildArgs} args
+ * @returns {string}
+ */
+function userFor(args) {
+  return args.userContent ?? buildUserPayload(args.texts);
 }
 
 /**
@@ -77,7 +89,7 @@ const openaiChat = {
       temperature: 0,
       messages: [
         { role: 'system', content: systemFor(args) },
-        { role: 'user', content: buildUserPayload(args.texts) },
+        { role: 'user', content: userFor(args) },
       ],
     };
     // 翻译不需要思考；只对支持的模型发字段，强制思考的模型直接不发
@@ -156,7 +168,7 @@ const openaiResponses = {
       temperature: 0,
       input: [
         { role: 'system', content: systemFor(args) },
-        { role: 'user', content: buildUserPayload(args.texts) },
+        { role: 'user', content: userFor(args) },
       ],
     };
     return { url, headers: llmHeaders(args), body };
@@ -197,7 +209,7 @@ const anthropicMessages = {
       max_tokens: 4096,
       temperature: 0,
       system: systemFor(args),
-      messages: [{ role: 'user', content: buildUserPayload(args.texts) }],
+      messages: [{ role: 'user', content: userFor(args) }],
     };
     return { url, headers, body };
   },
@@ -229,7 +241,7 @@ const googleGemini = {
     const url = key ? `${base}?key=${encodeURIComponent(key)}` : base;
     const body = {
       systemInstruction: { parts: [{ text: systemFor(args) }] },
-      contents: [{ role: 'user', parts: [{ text: buildUserPayload(args.texts) }] }],
+      contents: [{ role: 'user', parts: [{ text: userFor(args) }] }],
       generationConfig: { temperature: 0 },
     };
     return { url, headers: jsonHeaders(args.extraHeaders), body };
@@ -252,12 +264,99 @@ const googleGemini = {
   },
 };
 
+/* ----------------------------- Microsoft MT ----------------------------- */
+
+/**
+ * Edge / Azure 的响应同形：`[{ translations: [{ text }] }]`，按输入顺序取第一条译文。
+ * @param {any} json
+ * @returns {string[]}
+ */
+function parseMicrosoft(json) {
+  if (!Array.isArray(json)) fail(`响应缺少 translations 数组：${clip(JSON.stringify(json))}`);
+  return json.map((item) => String(item?.translations?.[0]?.text ?? ''));
+}
+
+/**
+ * Edge 内置翻译的内部免费接口：没有 key / region / Authorization。
+ * 无 SLA，可能限流或改路径；失败时用户可切到 Azure 或自定义。
+ * @type {Protocol}
+ */
+const microsoftEdge = {
+  id: 'microsoft-edge',
+  label: 'Microsoft Edge 翻译（无需 key）',
+  supportsGlossary: false,
+  buildRequest(args) {
+    const base = args.config.baseUrl || 'https://edge.microsoft.com';
+    const to = microsoftCode(args.targetCode || args.target);
+    const url = `${joinUrl(base, '/translate/translatetext')}?from=&to=${encodeURIComponent(
+      to,
+    )}&isEnterpriseClient=false`;
+    return {
+      url,
+      // 内部接口只认这几个头；不要混入 Authorization
+      headers: { 'Content-Type': 'application/json' },
+      body: args.texts,
+    };
+  },
+  parseResponse(json) {
+    return parseMicrosoft(json);
+  },
+  async translate(args) {
+    const request = microsoftEdge.buildRequest(args);
+    const data = await postJson(request.url, {
+      headers: request.headers,
+      body: request.body,
+      timeoutMs: 30000,
+      retryDelays: args.retry?.delays,
+    });
+    return microsoftEdge.parseResponse(data);
+  },
+};
+
+/**
+ * Azure Translator 官方接口：key 必填；区域资源还要 `Ocp-Apim-Subscription-Region`。
+ * @type {Protocol}
+ */
+const microsoftAzure = {
+  id: 'microsoft-azure',
+  label: 'Microsoft Azure Translator',
+  supportsGlossary: false,
+  buildRequest(args) {
+    const base = args.config.baseUrl || 'https://api.cognitive.microsofttranslator.com';
+    const to = microsoftCode(args.targetCode || args.target);
+    const url = `${joinUrl(base, '/translate')}?api-version=3.0&to=${encodeURIComponent(to)}`;
+    /** @type {Record<string, string>} */
+    const headers = jsonHeaders(args.extraHeaders);
+    if (args.config.apiKey) headers['Ocp-Apim-Subscription-Key'] = args.config.apiKey;
+    if (args.config.region) headers['Ocp-Apim-Subscription-Region'] = args.config.region;
+    return {
+      url,
+      headers,
+      body: args.texts.map((text) => ({ Text: text })),
+    };
+  },
+  parseResponse(json) {
+    return parseMicrosoft(json);
+  },
+  async translate(args) {
+    const request = microsoftAzure.buildRequest(args);
+    const data = await postJson(request.url, {
+      headers: request.headers,
+      body: request.body,
+      timeoutMs: 30000,
+      retryDelays: args.retry?.delays,
+    });
+    return microsoftAzure.parseResponse(data);
+  },
+};
+
 /* --------------------------------- DeepL --------------------------------- */
 
 /** @type {Protocol} */
 const deepl = {
   id: 'deepl',
   label: 'DeepL',
+  supportsGlossary: false,
   buildRequest(args) {
     const url = joinUrl(args.config.baseUrl, '/v2/translate');
     return {
@@ -293,6 +392,8 @@ export const PROTOCOLS = {
   'openai-responses': openaiResponses,
   'anthropic-messages': anthropicMessages,
   'google-gemini': googleGemini,
+  'microsoft-edge': microsoftEdge,
+  'microsoft-azure': microsoftAzure,
   deepl,
 };
 

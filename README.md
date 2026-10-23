@@ -5,7 +5,7 @@
 - 纯译文 / 双语两种展示模式，随时可还原
 - 视口优先：先翻当前视野，滚动继续补翻；也可切「整页」一次翻完
 - 术语保护：品牌、产品、型号名不被翻译（可内置词库 + 自定义词表）
-- 12 个内置服务预设 + 自定义，模型列表可联网刷新
+- 15 个内置服务预设 + 自定义，模型列表可联网刷新
 - API 密钥保存在浏览器本地，不上传、不同步、不进仓库
 
 ## 设计约束
@@ -30,13 +30,14 @@ extension/              # chrome://extensions 里直接加载这个目录
     settings.js         # chrome.storage.local 读写、schema 迁移、sessionId
     languages.js        # 目标语言唯一来源（10 项）
     provider-presets.js # 12 个内置预设 + custom
-    protocols.js        # 5 种协议的 URL / 鉴权 / 请求体 / 响应解析
-    providers.js        # translateBatch：等长校验 + 术语注入 + 译后校验
+    protocols.js        # 7 种协议的 URL / 鉴权 / 请求体 / 响应解析
+    providers.js        # translateBatch：等长校验 + 术语注入 + 译后校验；reviewTranslations：审校层
     http.js             # 超时、429 退避、ProviderError
     segments.js         # 模型返回解析
     prompt.js           # 各协议共用的 system / repair prompt
     models.js           # 模型列表 URL 推导、解析与回退
     glossary.js         # 术语匹配与校验（纯函数）
+    review.js           # 审校规则筛可疑段、修正校验（纯函数）
     glossary-data.json  # 内置词库（构建产物，由 build:glossary 生成）
 scripts/
   smoke.mjs             # provider / 协议 / 术语 / 迁移冒烟
@@ -66,13 +67,16 @@ npm run build:glossary -- --check   # 校验入库词库与源文件一致
 
 ## 翻译服务
 
-内置 12 个预设，另可添加「自定义」（5 种协议任选）。**标「接口未实测」的只有路由级验证，没有真 key 端到端跑过**，设置页会明确标注。
+内置 15 个预设，另可添加「自定义」（7 种协议任选）。**标「接口未实测」的只有路由级验证，没有真 key 端到端跑过**，设置页会明确标注。
 
 | 预设 | 协议 | 验证状态 |
 | --- | --- | --- |
 | OpenCode Go | OpenAI Chat | 已实测（需要 `x-opencode-session`，扩展自动带上） |
 | 商汤 SenseNova | OpenAI Chat | 已实测（RPM 较低，自动退避重试） |
 | DeepL | DeepL | 已实测（不支持术语保护） |
+| Microsoft Edge 翻译 | Microsoft Edge | 接口直接请求已实测（无需 key）；扩展内待真机 |
+| Microsoft Azure Translator | Microsoft Azure | 接口未实测（需要 key + Region） |
+| Index-Translate（本地代理） | OpenAI Chat | 接口未实测（需要本地代理，浏览器直连会 412） |
 | OpenAI | OpenAI Chat | 接口未实测 |
 | DeepSeek | OpenAI Chat | 接口未实测 |
 | Kimi（中国站 / 国际站） | OpenAI Chat | 接口未实测 |
@@ -81,11 +85,13 @@ npm run build:glossary -- --check   # 校验入库词库与源文件一致
 | MiniMax | OpenAI Chat | 接口未实测 |
 | OpenRouter | OpenAI Chat | 接口未实测 |
 | 硅基流动 | OpenAI Chat | 接口未实测 |
-| 自定义 | 5 种协议任选 | 取决于你填的地址 |
+| 自定义 | 7 种协议任选 | 取决于你填的地址 |
 
 - **模型**：下拉 + 「刷新」按钮；刷新会调后台 `models.list`，失败/超时就退回预设建议，不弹红字。也可以切「手动输入」。
-- **自定义协议**：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`deepl`。
+- **自定义协议**：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`microsoft-edge`、`microsoft-azure`、`deepl`。
 - **本地服务**（Ollama / One-API）走「自定义」，API Key 可以留空。
+- **微软翻译**：Edge 预设走浏览器内置翻译的内部免费接口，无需 key；Azure 是官方稳定版，需要 key，区域资源还要填 `Region`。两种都会把页面文本发给微软。
+- **Index-Translate**：免费 LLM，但公网接口对浏览器/扩展返回 412，需要先在本地跑仓库提供的代理（默认 `http://127.0.0.1:8080/v1`）。
 
 ### 加一个新服务
 
@@ -118,8 +124,19 @@ npm run build:glossary -- --check   # 校验入库词库与源文件一致
   - `fallback`：漏词就整段保留原文。最保守，可能出现成片未翻译。
   - `repair`：先只重翻漏词段，仍漏才保留原文。默认。
   - `warn`：译文照常显示，只在结果里提示可能漏词。最流畅。
-- **DeepL 不支持术语保护**：它没有 prompt 通道，扩展对它完全跳过术语层。
+- **DeepL 与微软翻译不支持术语保护**：它们没有 prompt 通道，扩展对它们完全跳过术语层。
 - 每批最多把 40 条命中术语注入 prompt，校验也只针对这 40 条。
+
+## 审校（可选）
+
+目标是给 MT（DeepL / 微软）兜底，而不是把整页重发一遍。
+
+- 设置页「审校服务」从已配置的 LLM 里选，默认「不审校」。
+- 主翻译完成后，规则先筛可疑段：术语缺失、空译 / 与原文相同、长度比异常、目标语种脚本不对、数字 / URL / 占位符数量变化、相邻段完全重复。
+- 最多送审 200 段 / 8,000 字符，一次 LLM 请求只返回这些段的修正；超出上限会标记 `truncated`。
+- 校验不过的修正直接丢弃，保留主译文：空串、与主译文相同、没有术语缺失时退回原文、数字/URL/占位符变化、仍漏术语。
+- 审校请求失败或返回数量不符时不影响主译文，结果里提示「审校失败」。
+- 修正按顺序对齐回可疑段，不依赖模型返回的 `index`，避免模型改号导致译文错位。
 
 ## 目标语言
 
@@ -127,18 +144,20 @@ popup 与设置页共用 `extension/lib/languages.js` 的 10 项列表：简体�
 
 ## 现状与边界
 
-- 已实现：视口优先 + 滚动续翻（可切整页）、整页翻译（按 provider 策略分批、最多 8 路并发、失败批自动补跑、按 provider/模型关闭思考）、纯译文与双语、还原、多服务与预设、模型列表刷新、术语保护三档、进度轮询、连通性测试
-- 未实现：划词翻译、翻译缓存、快捷键、按站点开关、接口用量统计、术语 → 指定译法
+- 已实现：视口优先 + 滚动续翻（可切整页）、整页翻译（按 provider 策略分批、最多 8 路并发、失败批自动补跑、按 provider/模型关闭思考）、纯译文与双语、还原、多服务与预设、模型列表刷新、术语保护三档、可选 LLM 审校、进度轮询、连通性测试
+- 未实现：划词翻译、翻译缓存、快捷键、按站点开关、接口用量统计、术语 → 指定译法、全量 AI 评分
 - 已知限制：
   - 只在顶层 frame 生效；不分段保留页面内联标签的结构
   - 双语模式跳过含代码的块；SPA 页面需要等渲染完成再点翻译（之后新插入的内容会由视口续翻补上）
   - 长块按句切分会丢一点跨句上下文；单句超 1200 字符时硬切
   - 无限滚动页面会持续产生补翻任务，靠熔断与隐藏暂停兜底；进度 `total` 会随滚动增长
   - 翻译中改目标语言：popup 会禁用相关控件，但设置页不感知，可能让同一页前后批次用不同语言
-  - 12 个预设里有 9 个只有路由级验证，baseUrl / 模型名可能过期
-  - 限流端点（OpenCode Go、商汤）在超长页面上可能因 429 触发熔断，只翻一部分；长页面优先用 DeepL
+  - 15 个预设里除 OpenCode Go / 商汤 / DeepL / Edge 接口外，其余只有路由级验证，baseUrl / 模型名可能过期
+  - 限流端点（OpenCode Go、商汤）在超长页面上可能因 429 触发熔断，只翻一部分；长页面优先用 DeepL 或微软 MT
+  - Microsoft Edge 翻译是浏览器内部接口：无 SLA、可能限流或改路径；失效时要能切到 Azure / 自定义
+  - 审校只做规则筛出的可疑段，不保证全页质量；配置审校后页面文本会多一个数据流向
 - 行为说明：每一轮翻译都从原文出发，开始时会先撤销上一轮的译文。如果新一轮第一批就失败（例如密钥失效），页面会停在原文；其余批次失败会继续，**连续 3 批失败则熔断**，保留已翻部分。
 
 ## 状态
 
-`0.2.0`。自动化检查（类型、两套冒烟、词库一致性）通过；四个验收页的真机回归尚未跑。
+`0.2.0`。自动化检查（类型、两套冒烟、词库一致性）通过；阶段 E/F 的真机验收记录见 `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md`。
