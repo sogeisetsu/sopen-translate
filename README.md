@@ -98,6 +98,53 @@ npm run build:glossary -- --check   # 校验入库词库与源文件一致
 
 改 `extension/lib/provider-presets.js`，往 `PROVIDER_PRESETS` 加一条预设；`{baseUrl}/models` 不是通用推导时补 `modelsUrl`（OpenCode Go 就是反例）。新协议才需要动 `extension/lib/protocols.js` 与 `types.d.ts`。
 
+## 三条翻译路径（MT / LLM / DeepL）
+
+同一套 `translate` 管线，三条路径只在「术语注入 / repair / 审校」三处分叉。橙色是这条路径的关键差异，灰色虚线表示跳过。
+
+**术语注入是 LLM 专属；微软 MT 和 DeepL 没有 prompt 通道，只能靠事后审校补。** DeepL 本身也是 MT，这里按接入方式单独列出。
+
+```mermaid
+flowchart LR
+  subgraph MT["微软 MT（Edge / Azure）"]
+    direction TB
+    mt1["1 收集 / 分批"] --> mt2["2 术语注入：跳过<br/>无 prompt 通道"]
+    mt2 --> mt3["3 主翻译<br/>body: [a, b]"]
+    mt3 --> mt4["4 译后校验：跳过<br/>没有词表"]
+    mt4 --> mt5["5 repair：不执行<br/>没有 prompt"]
+    mt5 --> mt6["6 审校层（可选）<br/>规则筛 → 第二个 LLM"]
+  end
+
+  subgraph LLM["大模型 LLM"]
+    direction TB
+    llm1["1 收集 / 分批"] --> llm2["2 术语注入（≤40 条）<br/>写入 system prompt"]
+    llm2 --> llm3["3 主翻译<br/>system prompt 带术语"]
+    llm3 --> llm4["4 译后校验<br/>只查这 40 条"]
+    llm4 --> llm5["5 repair<br/>漏词段重发同一个 provider"]
+    llm5 --> llm6["6 审校层<br/>默认跳过（避免双倍成本）"]
+  end
+
+  subgraph DEEPL["DeepL（也是 MT）"]
+    direction TB
+    dp1["1 收集 / 分批"] --> dp2["2 术语注入：跳过<br/>本实现不接 glossary"]
+    dp2 --> dp3["3 主翻译<br/>text[] + target_lang"]
+    dp3 --> dp4["4 译后校验：跳过<br/>没有词表"]
+    dp4 --> dp5["5 repair：不执行<br/>没有 prompt"]
+    dp5 --> dp6["6 审校层（可选）<br/>候选通常比 MT 少"]
+  end
+
+  classDef hot fill:#ffedd5,stroke:#ea580c,stroke-width:2px,color:#9a3412
+  classDef skip fill:#f6f8fa,stroke:#d0d7de,stroke-dasharray: 5 5,color:#57606a
+  MT ~~~ LLM
+  LLM ~~~ DEEPL
+  class llm2 hot
+  class mt2,mt4,mt5,llm6,dp2,dp4,dp5 skip
+```
+
+- **微软 MT / DeepL**：术语层和 `repair` 都跳过；`fallback / repair / warn` 三档对它们不生效。审校层是唯一的事后补救，但只修规则看得见的硬伤。
+- **LLM**：术语注入 → 译后校验 → `repair` 漏词段；审校层默认跳过，因为 `repair` 已经处理术语，再跑第二个模型是双倍成本。
+- **共同点**：原序等长、连续 3 批失败熔断、`pageToken` 审校预算、还原语义都不变。
+
 ## 双语模式
 
 - popup 里切换「纯译文 / 双语」，立即保存；已翻译的页面需要点「还原」后重新翻译生效。
