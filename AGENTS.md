@@ -41,6 +41,10 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 - `translate()` / `translateBatch()` 必须原序返回等长数组，数量不符直接抛错。
 - 每轮翻译前先 `resetPage()`，否则第二轮会翻译文、还原也回不到原文。
+- 视口优先（默认）与整页是同一套渲染路径：`content.js` 每次翻译开始时**一次性**读 `displayMode + translateScope`；`whole` 不装观察器，`viewport` 首屏只翻视口 + 500px，之后靠 scroll / resize / MutationObserver / visibilitychange 补翻。
+- 续翻的 `seenNodes` / `seenBlocks` **只在请求成功后标记**；失败项要放回 pending，否则会永远漏翻。`resetPage()` 必须断开全部观察器、清空 pending/seen/progress。
+- 自己插入的 `.sopen-translated-block` 与浮层不算「页面变了」：MutationObserver 里要过滤，不然每次写入都会触发一次补扫。
+- 隐藏标签页暂停补翻；`page.status` 额外返回 `scope` 与 `pending`（是否还有可见未处理候选）。
 - 只有第 0 批失败立即中止；连续 3 批失败熔断，保留已翻部分。
 - 术语只校验本批注入 prompt 的 ≤40 条（`termsForPrompt`），不要拿完整词表校验。
 - DeepL 完全跳过术语层（不注入、不校验、不回退）。
@@ -91,6 +95,8 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 不要给 `#sopen-translate-ui` 加 inline `all: initial`：会重置 `position` / `pointer-events`。
 - `response_format` 回退只在 400/404/422；401/403/429 直接上抛，否则一次 429 会变成 8 次请求。
 - 双语会跳过含 `PRE/CODE/KBD/SAMP/...` 后代的块（含内联 `<code>`），这是有意的覆盖率损失。
+- 视口判定的 rect 全 0 视为隐藏/未布局；`smoke:dom` 的假 DOM 默认给可见 rect，测视口用例时用 `offscreen(el)` 设置元素 rect。
+- `smoke:dom` 的 `window` / `document` 事件与 `MutationObserver` 都是桩：要触发续翻，用 `fireListener(windowListeners, 'scroll')` 或 `fireMutations(...)`。
 - 叶子容器回退：`div/section/article/main` 没有块级后代且文本 ≥40 字才算一块。
 - 术语层出问题先关掉设置页的「使用内置词库」复现，再判断是渲染、prompt 还是校验。
 - `tsconfig.json` 的 `noImplicitAny: false` 是故意的；真正生效的是 `strictNullChecks` 与契约检查，别顺手打开。

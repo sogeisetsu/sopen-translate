@@ -10,7 +10,8 @@ import { LANGUAGES, findLanguage } from './lib/languages.js';
 
 /** @typedef {import('../types').Settings} Settings */
 /** @typedef {import('../types').DisplayMode} DisplayMode */
-/** @typedef {{ translated: number, busy: boolean, mode?: DisplayMode, progress?: { done: number, total: number } }} PageStatus */
+/** @typedef {import('../types').TranslateScope} TranslateScope */
+/** @typedef {{ translated: number, busy: boolean, mode?: DisplayMode, scope?: TranslateScope, pending?: boolean, progress?: { done: number, total: number } }} PageStatus */
 
 const POLL_INTERVAL = 500;
 
@@ -30,7 +31,10 @@ const messageEl = pick('message');
 const mainBtn = /** @type {HTMLButtonElement} */ (pick('main'));
 const langEl = /** @type {HTMLSelectElement} */ (pick('target-lang'));
 const modeButtons = /** @type {HTMLButtonElement[]} */ (
-  Array.from(document.querySelectorAll('.mode button'))
+  Array.from(document.querySelectorAll('.mode button[data-mode]'))
+);
+const scopeButtons = /** @type {HTMLButtonElement[]} */ (
+  Array.from(document.querySelectorAll('.mode button[data-scope]'))
 );
 
 const state = {
@@ -99,6 +103,13 @@ function buildModeButtons() {
   }
 }
 
+function buildScopeButtons() {
+  const scope = state.settings?.translateScope === 'whole' ? 'whole' : 'viewport';
+  for (const button of scopeButtons) {
+    button.setAttribute('aria-pressed', String(button.dataset.scope === scope));
+  }
+}
+
 function render() {
   const page = state.page;
   const busy = Boolean(page?.busy);
@@ -125,17 +136,20 @@ function render() {
     mainBtn.disabled = false;
     mainBtn.textContent = '还原';
     mainBtn.dataset.action = 'restore';
-    setMessage(`已翻译 ${page?.translated ?? 0} ${page?.mode === 'bilingual' ? '块' : '段'}`);
+    const unit = page?.mode === 'bilingual' ? '块' : '段';
+    const pending = page?.pending ? '，滚动继续翻译' : '';
+    setMessage(`已翻译 ${page?.translated ?? 0} ${unit}${pending}`);
   } else {
     mainBtn.disabled = false;
     mainBtn.textContent = '翻译';
     mainBtn.dataset.action = 'translate';
-    setMessage('');
+    setMessage(page?.pending ? '滚动后继续翻译可视区域' : '');
   }
 
-  // 翻译中禁掉模式与语言：background 每批读一次设置，
-  // 中途改会让同一页前后批次用不同目标语言 / 模式。
+  // 翻译中禁掉模式、范围与语言：background 每批读一次设置，
+  // 中途改会让同一页前后批次用不同目标语言 / 模式 / 范围。
   for (const button of modeButtons) button.disabled = busy;
+  for (const button of scopeButtons) button.disabled = busy;
   langEl.disabled = busy;
 }
 
@@ -257,6 +271,18 @@ for (const button of modeButtons) {
   });
 }
 
+for (const button of scopeButtons) {
+  button.addEventListener('click', async () => {
+    const scope = /** @type {TranslateScope} */ (button.dataset.scope);
+    if (!state.settings || state.settings.translateScope === scope) return;
+    state.settings = await saveSettings({ translateScope: scope });
+    buildScopeButtons();
+    if ((state.page?.translated ?? 0) > 0) {
+      setMessage('已切换；点「还原」后重新翻译生效');
+    }
+  });
+}
+
 langEl.addEventListener('change', async () => {
   const language = findLanguage(langEl.value);
   if (!language) return; // 只读的老值项
@@ -280,6 +306,7 @@ pick('open-options').addEventListener('click', (event) => {
     state.settings = await getSettings();
     buildLanguageOptions();
     buildModeButtons();
+    buildScopeButtons();
     await refresh();
   } catch (err) {
     setMessage(err instanceof Error ? err.message : String(err), true);

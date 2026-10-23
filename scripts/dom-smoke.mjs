@@ -25,6 +25,10 @@ const BLOCKY = new Set([
 
 /* ------------------------------- 假 DOM ------------------------------- */
 
+/** 默认所有元素都“在视口里”；需要测视口优先时给元素设置 rect */
+const VISIBLE_RECT = { top: 0, left: 0, right: 100, bottom: 20, width: 100, height: 20 };
+const ZERO_RECT = { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+
 function makeText(value) {
   return { nodeType: 3, nodeValue: value, parentElement: null, parentNode: null };
 }
@@ -56,8 +60,16 @@ function makeElement(tagName) {
     hidden: false,
     dataset: {},
     style: {},
+    /** @type {{ top: number, left: number, right: number, bottom: number, width: number, height: number } | null} */
+    rect: null,
     _text: '',
     _attrs: {},
+
+    getBoundingClientRect() {
+      if (node.rect) return node.rect;
+      if (node.hidden) return ZERO_RECT;
+      return VISIBLE_RECT;
+    },
 
     append(...kids) {
       for (const kid of kids) {
@@ -195,10 +207,63 @@ const body = makeElement('body');
 documentElement.append(body);
 markConnected(documentElement, true);
 
+/** 事件监听登记：用例可以手动触发 scroll / visibilitychange */
+/** @type {Map<string, Set<Function>>} */
+const windowListeners = new Map();
+/** @type {Map<string, Set<Function>>} */
+const documentListeners = new Map();
+
+function addListener(map, type, fn) {
+  const set = map.get(type) || new Set();
+  set.add(fn);
+  map.set(type, set);
+}
+
+function removeListener(map, type, fn) {
+  map.get(type)?.delete(fn);
+}
+
+function fireListener(map, type) {
+  for (const fn of map.get(type) || []) fn({ type });
+}
+
+/** MutationObserver 桩：只记录 active 的观察者，测试手动投递记录 */
+/** @type {{ callback: Function, active: boolean }[]} */
+const mutationObservers = [];
+
+class FakeMutationObserver {
+  constructor(callback) {
+    this.callback = callback;
+    this.active = false;
+    mutationObservers.push(this);
+  }
+
+  observe() {
+    this.active = true;
+  }
+
+  disconnect() {
+    this.active = false;
+  }
+}
+
+function fireMutations(records) {
+  for (const observer of mutationObservers) {
+    if (observer.active) observer.callback(records);
+  }
+}
+
 const fakeDocument = {
   body,
   documentElement,
+  hidden: false,
   createElement: (tag) => makeElement(tag),
+  addEventListener(type, fn) {
+    addListener(documentListeners, type, fn);
+  },
+  removeEventListener(type, fn) {
+    removeListener(documentListeners, type, fn);
+  },
   createTreeWalker(root, _what, filter) {
     const all = [];
     const walk = (node) => {
@@ -229,6 +294,7 @@ const fakeDocument = {
 /* ------------------------------- 环境桩 ------------------------------- */
 
 let displayMode = 'translation';
+let translateScope = 'viewport';
 let translator = (text) => text;
 /** @type {null | ((texts: string[], call: number) => any)} */
 let responder = null;
@@ -241,7 +307,17 @@ const seen = [];
 let calls = 0;
 
 globalThis.document = fakeDocument;
-globalThis.window = {};
+globalThis.window = {
+  innerHeight: 800,
+  innerWidth: 1200,
+  addEventListener(type, fn) {
+    addListener(windowListeners, type, fn);
+  },
+  removeEventListener(type, fn) {
+    removeListener(windowListeners, type, fn);
+  },
+};
+globalThis.MutationObserver = FakeMutationObserver;
 globalThis.NodeFilter = { SHOW_TEXT, FILTER_ACCEPT, FILTER_REJECT };
 globalThis.chrome = {
   runtime: {
@@ -275,7 +351,7 @@ globalThis.chrome = {
   storage: {
     local: {
       async get() {
-        return { settings: { displayMode } };
+        return { settings: { displayMode, translateScope } };
       },
     },
   },
@@ -335,6 +411,11 @@ async function resetPageStub() {
   await send({ type: 'page.restore' });
   resetBody();
   displayMode = 'translation';
+  translateScope = 'viewport';
+  fakeDocument.hidden = false;
+  windowListeners.clear();
+  documentListeners.clear();
+  for (const observer of mutationObservers) observer.active = false;
   translator = (text) => `中:${text}`;
   responder = null;
   gate = null;
@@ -343,6 +424,17 @@ async function resetPageStub() {
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 轮询等待异步补翻完成，避免用例依赖固定 sleep 时长 */
+async function waitFor(check, timeout = 2000) {
+  const started = Date.now();
+  for (;;) {
+    if (check()) return;
+    if (Date.now() - started > timeout) throw new Error('等待超时');
+    await sleep(10);
+  }
+}
 
 /* -------------------------------- 用例 -------------------------------- */
 
@@ -655,6 +747,140 @@ await test('进度：翻译中 total > 0，结束后 done === total', async () =
   assert.equal(after.busy, false);
   assert.equal(after.progress.done, after.progress.total);
   assert.equal(after.translated, 2);
+});
+
+/* ---------------------------- 视口优先 + 续翻 ---------------------------- */
+
+/** 把元素放到视口外（500px 余量之外） */
+function offscreen(node, top = 2000) {
+  node.rect = { top, left: 0, right: 100, bottom: top + 20, width: 100, height: 20 };
+}
+
+await test('视口优先：只翻视口内文本，滚动后补翻且不重复', async () => {
+  await resetPageStub();
+  const near = el('p', 'Near text');
+  const far = el('p', 'Far text');
+  offscreen(far);
+  resetBody(near, far);
+
+  const first = await send({ type: 'page.translate' });
+  assert.equal(first.ok, true, first.error);
+  assert.equal(near.textContent, '中:Near text');
+  assert.equal(far.textContent, 'Far text', '视口外不应翻译');
+
+  const initialStatus = await send({ type: 'page.status' });
+  assert.equal(initialStatus.scope, 'viewport');
+  assert.equal(initialStatus.translated, 1);
+  assert.equal(initialStatus.pending, false, '视口外候选不算 pending');
+  assert.equal(initialStatus.progress.total, 1, '初次只统计视口段');
+
+  const before = calls;
+  far.rect = null;
+  fireListener(windowListeners, 'scroll');
+  await waitFor(() => far.textContent === '中:Far text');
+
+  assert.equal(calls, before + 1, '滚动补翻只发一次请求');
+  assert.equal(near.textContent, '中:Near text', '已翻节点不能被再翻一遍');
+  const after = await send({ type: 'page.status' });
+  assert.equal(after.translated, 2);
+  assert.equal(after.progress.done, after.progress.total);
+});
+
+await test('视口优先（双语）：滚动后只给新进入视口的块插入 span', async () => {
+  await resetPageStub();
+  displayMode = 'bilingual';
+  const near = el('p', 'Near block');
+  const far = el('p', 'Far block');
+  offscreen(far);
+  resetBody(near, far);
+
+  const first = await send({ type: 'page.translate' });
+  assert.equal(first.ok, true, first.error);
+  assert.equal(directSpans(near).length, 1);
+  assert.equal(directSpans(far).length, 0);
+
+  far.rect = null;
+  fireListener(windowListeners, 'scroll');
+  await waitFor(() => directSpans(far).length === 1);
+  assert.equal(directSpans(near).length, 1, '已有译文块不能重复插入');
+});
+
+await test('整页范围：视口外也一次翻完，且不装滚动观察器', async () => {
+  await resetPageStub();
+  translateScope = 'whole';
+  const near = el('p', 'Whole near');
+  const far = el('p', 'Whole far');
+  offscreen(far);
+  resetBody(near, far);
+
+  const result = await send({ type: 'page.translate' });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(near.textContent, '中:Whole near');
+  assert.equal(far.textContent, '中:Whole far');
+
+  const status = await send({ type: 'page.status' });
+  assert.equal(status.scope, 'whole');
+  const before = calls;
+  fireListener(windowListeners, 'scroll');
+  await sleep(30);
+  assert.equal(calls, before, '整页模式不应有滚动请求');
+});
+
+await test('MutationObserver：SPA 新插入的节点会被补翻', async () => {
+  await resetPageStub();
+  const first = el('p', 'First render');
+  resetBody(first);
+  await send({ type: 'page.translate' });
+  assert.equal(first.textContent, '中:First render');
+
+  const later = el('p', 'Late render');
+  body.append(later);
+  fireMutations([{ addedNodes: [later], removedNodes: [] }]);
+  await waitFor(() => later.textContent === '中:Late render', 3000);
+  assert.equal(first.textContent, '中:First render');
+});
+
+await test('还原会断开观察器：之后滚动不再发请求', async () => {
+  await resetPageStub();
+  const near = el('p', 'Near restore');
+  const far = el('p', 'Far restore');
+  offscreen(far);
+  resetBody(near, far);
+  await send({ type: 'page.translate' });
+
+  const restore = await send({ type: 'page.restore' });
+  assert.equal(restore.ok, true);
+  assert.equal(near.textContent, 'Near restore');
+
+  const before = calls;
+  far.rect = null;
+  fireListener(windowListeners, 'scroll');
+  await sleep(50);
+  assert.equal(calls, before, '还原后不应再请求');
+
+  const status = await send({ type: 'page.status' });
+  assert.equal(status.translated, 0);
+  assert.equal(status.pending, false);
+});
+
+await test('visibilitychange：隐藏时暂停补翻，恢复后补扫', async () => {
+  await resetPageStub();
+  const near = el('p', 'Visible tab');
+  const far = el('p', 'Hidden tab');
+  offscreen(far);
+  resetBody(near, far);
+  await send({ type: 'page.translate' });
+
+  fakeDocument.hidden = true;
+  fireListener(documentListeners, 'visibilitychange');
+  far.rect = null;
+  fireListener(windowListeners, 'scroll');
+  await sleep(80);
+  assert.equal(far.textContent, 'Hidden tab', '隐藏标签页不应继续烧 token');
+
+  fakeDocument.hidden = false;
+  fireListener(documentListeners, 'visibilitychange');
+  await waitFor(() => far.textContent === '中:Hidden tab');
 });
 
 if (failures > 0) {

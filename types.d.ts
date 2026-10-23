@@ -10,10 +10,15 @@ export type ProtocolId =
   | 'openai-responses'
   | 'anthropic-messages'
   | 'google-gemini'
-  | 'deepl';
+  | 'deepl'
+  | 'microsoft-edge'
+  | 'microsoft-azure';
 
 export type EnforcementMode = 'fallback' | 'repair' | 'warn';
 export type DisplayMode = 'translation' | 'bilingual';
+/** 翻译范围：视口优先（滚动续翻）或一次性整页 */
+export type TranslateScope = 'viewport' | 'whole';
+
 
 export interface ModelsCache {
   at: number;
@@ -32,6 +37,8 @@ export interface ProviderConfig {
   modelsUrl?: string;
   model?: string;
   apiKey?: string;
+  /** 仅 Azure Translator：区域资源必填，global 可空 */
+  region?: string;
   modelsCache?: ModelsCache;
   /** 仅旧配置迁移时短暂存在，迁移后删除 */
   type?: 'openai' | 'deepl';
@@ -49,11 +56,32 @@ export interface Settings {
   activeProviderId: string | null;
   providers: ProviderConfig[];
   displayMode: DisplayMode;
+  translateScope: TranslateScope;
   enforcement: EnforcementMode;
   glossary: GlossarySettings;
+  /** 可选审校服务：从已配置的 LLM provider 里选；null = 不审校 */
+  reviewProviderId: string | null;
   /** 每安装一个 UUID；OpenCode Go 的 x-opencode-session 用它 */
   sessionId: string;
 }
+
+export interface ReviewOutcome {
+  /** 送审的段数 */
+  reviewed: number;
+  /** 实际替换的段数 */
+  corrected: number;
+  /** 审校请求失败（主译文保留） */
+  failed: boolean;
+  /** 可疑段超过上限，只审了前 N 段 */
+  truncated: boolean;
+}
+
+export interface ReviewItem {
+  index: number;
+  reasons: string[];
+  missing: string[];
+}
+
 
 export interface TranslateArgs {
   texts: string[];
@@ -74,6 +102,8 @@ export interface TranslateBatchResult {
   protected: number;
   /** 仅 warn 模式：哪些段可能漏了词 */
   warnings: { index: number; missing: string[] }[];
+  /** 配了审校服务时的结果；MT（DeepL / 微软）也走这一层 */
+  review?: ReviewOutcome;
 }
 
 export interface ProtocolBuildArgs {
@@ -86,11 +116,17 @@ export interface ProtocolBuildArgs {
   extraHeaders?: Record<string, string>;
   jsonMode?: boolean;
   repair?: boolean;
+  /** 覆盖默认翻译 system prompt（审校层用） */
+  system?: string;
+  /** 覆盖默认 `{segments:[...]}` user payload（审校层用） */
+  userContent?: string;
 }
 
 export interface Protocol {
   id: ProtocolId;
   label: string;
+  /** 是否支持 prompt 级术语注入；MT 为 false（DeepL / 微软） */
+  supportsGlossary?: boolean;
   buildRequest: (args: ProtocolBuildArgs) => {
     url: string;
     headers: Record<string, string>;
@@ -99,6 +135,7 @@ export interface Protocol {
   parseResponse: (json: any) => string[];
   translate: (args: ProtocolBuildArgs & { retry?: { delays: number[] } }) => Promise<string[]>;
 }
+
 
 export interface FieldSpec {
   key: string;
