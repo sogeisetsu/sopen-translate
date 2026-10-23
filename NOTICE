@@ -3,58 +3,63 @@ Copyright 2026 sogeisetsu
 
 Licensed under the Apache License, Version 2.0. See LICENSE for the full text.
 
-Third-party data and notices
-============================
 
-`extension/lib/glossary-data.json` 是内置术语词库，由 `npm run build:glossary` 从
-`scripts/glossary-allowlist.txt`、`scripts/glossary-snapshot.json`、
-`scripts/glossary-blocklist.txt` 离线生成。运行时不联网。
+THIRD-PARTY DATA AND NOTICES
 
-下面只列**当前产物实际用到**的来源。
+extension/lib/glossary-data.json 是内置术语词库，由 npm run build:glossary 从
+scripts/glossary-allowlist.txt、scripts/glossary-snapshot.json、
+scripts/glossary-blocklist.txt 离线生成。运行时不联网。
 
-## simple-icons
+下面只列当前产物实际用到的来源。
 
-- 来源：https://github.com/simple-icons/simple-icons
-- 数据：https://unpkg.com/simple-icons@latest/data/simple-icons.json
-- 许可证：CC0 1.0 Universal（https://creativecommons.org/publicdomain/zero/1.0/）
-- 用途：品牌名候选。
-- 修改：仅提取条目的 `title`；只保留多词或含数字的标题，并按
-  `scripts/glossary-blocklist.txt` 过滤通用词，最终截断到固定条数。
 
-## models.dev
+simple-icons
 
-- 来源：https://github.com/anomalyco/models.dev
-- 数据：https://models.dev/api.json
-- 许可证：MIT License
-- 版权：Copyright (c) 2025 models.dev
-- 用途：模型名候选（例如 `DeepSeek V4.1 Flash`）。
-- 修改：仅提取模型 id / 名称；只保留多词或含数字的名称，过滤通用词并截断到固定条数。
+  来源：    https://github.com/simple-icons/simple-icons
+  数据：    https://unpkg.com/simple-icons@latest/data/simple-icons.json
+  许可证：  CC0 1.0 Universal
+            https://creativecommons.org/publicdomain/zero/1.0/
+  用途：    品牌名候选。
+  修改：    仅提取条目的 title；只保留多词或含数字的标题，并按
+            scripts/glossary-blocklist.txt 过滤通用词，最终截断到固定条数。
 
-MIT License 全文：
 
-```
-Copyright (c) 2025 models.dev
+models.dev
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+  来源：    https://github.com/anomalyco/models.dev
+  数据：    https://models.dev/api.json
+  许可证：  MIT License
+  版权：    Copyright (c) 2025 models.dev
+  用途：    模型名候选（例如 DeepSeek V4.1 Flash）。
+  修改：    仅提取模型 id / 名称；只保留多词或含数字的名称，过滤通用词并
+            截断到固定条数。
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+  MIT License 全文：
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
+  Copyright (c) 2025 models.dev
 
-## 说明
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
 
-- 词库中的名称归各自权利人所有，这里仅用于“翻译时保持原文”，不表示任何商标授权或背书。
-- 本项目自身代码采用 Apache License 2.0，完整文本见仓库根目录的 `LICENSE`。
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+
+说明
+
+  词库中的名称归各自权利人所有，这里仅用于“翻译时保持原文”，不表示任何
+  商标授权或背书。
+
+  本项目自身代码采用 Apache License 2.0，完整文本见仓库根目录的 LICENSE。

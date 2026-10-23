@@ -172,6 +172,17 @@ export const PROVIDER_PRESETS = [
     hint: '无需 key；Edge 内置翻译接口，四个验收页已实测。无 SLA，可能失效/限流；页面文本会发给微软。',
   },
   {
+    id: 'chrome-builtin',
+    label: 'Chrome 内置翻译（端侧）',
+    protocol: 'chrome-builtin',
+    baseUrl: '',
+    models: [],
+    supportsModelList: false,
+    requiresKey: false,
+    verified: false,
+    hint: 'Chrome/Chromium 端侧模型，页面文本不出本机、无需 key；首次要在卡片点「准备语言包」下载，仅桌面版支持。',
+  },
+  {
     id: 'microsoft-azure',
     label: 'Microsoft Azure Translator',
     protocol: 'microsoft-azure',
@@ -191,7 +202,7 @@ export const PROVIDER_PRESETS = [
     supportsModelList: false,
     requiresKey: false,
     verified: false,
-    hint: '非官方免费接口，无需 key；本机网络实测不可达，可能随时限流/失效。不做默认。',
+    hint: '非官方免费接口，无需 key；本机出口实测可达但返回 429，可能随时限流/失效。不做默认。',
   },
   {
     id: 'nvidia',

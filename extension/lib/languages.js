@@ -105,3 +105,17 @@ function rivaTag(value) {
 export function rivaPair(sourceLang, targetCode) {
   return `${rivaTag(sourceLang)}-${rivaTag(targetCode)}`;
 }
+
+/**
+ * Chrome 端侧 Translator API 用 BCP 47：`ZH-HANS → zh`、`ZH-HANT → zh-Hant`。
+ * 列表外的值原样返回；空值按英语处理。
+ * @param {string | undefined | null} nameOrCode
+ * @returns {string}
+ */
+export function builtinLang(nameOrCode) {
+  const language = findLanguage(nameOrCode);
+  if (language) return language.id === 'zh-Hans' ? 'zh' : language.id;
+  const raw = String(nameOrCode ?? '').trim().toLowerCase();
+  if (!raw) return 'en';
+  return raw === 'zh-hans' ? 'zh' : raw;
+}

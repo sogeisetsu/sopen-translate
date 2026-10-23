@@ -13,7 +13,8 @@ import { ProviderError, clip, fail, getJson, joinUrl, postJson } from './http.js
 import { parseSegments } from './segments.js';
 import { reasoningOffParams } from './reasoning.js';
 import { buildRepairSystemPrompt, buildSystemPrompt, buildUserPayload } from './prompt.js';
-import { googleCode, microsoftCode, rivaPair } from './languages.js';
+import { googleCode, microsoftCode, rivaPair, builtinLang } from './languages.js';
+import { translateWithBuiltin } from './offscreen.js';
 
 /** 已经证明不支持思考开关的配置（preset|baseUrl|model），避免每批都 400 一次 */
 const reasoningUnsupported = new Set();
@@ -440,6 +441,33 @@ const nvidiaRiva = {
   },
 };
 
+/* ------------------------------ chrome-builtin ------------------------------ */
+
+/**
+ * Chrome / Chromium 端侧内置翻译。Translator API 只在 window 上下文可用，
+ * 因此实际调用在 offscreen 文档里；这里只做语言码映射与消息桥。
+ * 页面文本不出本机，也不需要 key。
+ * @type {Protocol}
+ */
+const chromeBuiltin = {
+  id: 'chrome-builtin',
+  label: 'Chrome 内置翻译（端侧）',
+  supportsGlossary: false,
+  buildRequest() {
+    fail('Chrome 内置翻译不走 HTTP，由 offscreen 文档调用 Translator API');
+  },
+  parseResponse() {
+    fail('Chrome 内置翻译没有 HTTP 响应');
+  },
+  async translate(args) {
+    return translateWithBuiltin({
+      texts: args.texts,
+      sourceLanguage: builtinLang(args.config.sourceLang || 'en'),
+      targetLanguage: builtinLang(args.targetCode || args.target),
+    });
+  },
+};
+
 /* ---------------------------- Google 免费接口 ---------------------------- */
 
 /** 非官方网页接口一次只接受一个 q；超过这个长度就按句切开串行请求 */
@@ -594,6 +622,7 @@ export const PROTOCOLS = {
   'microsoft-azure': microsoftAzure,
   'google-free': googleFree,
   'nvidia-riva': nvidiaRiva,
+  'chrome-builtin': chromeBuiltin,
   deepl,
 };
 

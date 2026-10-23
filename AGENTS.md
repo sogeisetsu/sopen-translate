@@ -31,6 +31,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 ## 分层与作用域
 
 - `extension/background.js`（module）是**唯一出网口**，也是唯一读密钥的地方；content 只发消息。
+- `extension/offscreen.js` 只调用浏览器端侧 Translator API（`chrome-builtin`），不联网、不读 key；它是唯一能拿到 `Translator` 的上下文。
 - `extension/content.js` 是 classic script，**不能出现 `import`**；共享代码走消息，不要为 import 引入打包步骤。
 - popup / options 是普通页面，可以直接 `import lib/*.js`。
 - 浮层只挂 `#sopen-translate-ui`，`pointer-events: none` 不要改。
@@ -47,8 +48,8 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 隐藏标签页暂停补翻；`page.status` 额外返回 `scope` 与 `pending`（是否还有可见未处理候选）。
 - 只有第 0 批失败立即中止；连续 3 批失败熔断，保留已翻部分。
 - 术语只校验本批注入 prompt 的 ≤40 条（`termsForPrompt`），不要拿完整词表校验。
-- DeepL、微软 MT（`microsoft-edge` / `microsoft-azure`）、Google 免费接口与 `nvidia-riva` 完全跳过术语层（不注入、不校验、不回退）。
-- 语言只有 `lib/languages.js` 一个来源（LLM 用 `name`，DeepL 用 `code`，微软用 `ms`，Google 免费接口用 `google`，Riva 用 `rivaPair()` 拼语言对）。
+- DeepL、微软 MT（`microsoft-edge` / `microsoft-azure`）、Google 免费接口、`nvidia-riva` 与 `chrome-builtin` 完全跳过术语层（不注入、不校验、不回退）。
+- 语言只有 `lib/languages.js` 一个来源（LLM 用 `name`，DeepL 用 `code`，微软用 `ms`，Google 免费接口用 `google`，Riva 用 `rivaPair()`，Chrome 内置翻译用 `builtinLang()`）。
 - 审校层只处理规则筛出的可疑段：`lib/review.js` 是纯函数（候选、严重度、二次校验），`providers.js` 的 `reviewTranslations()` 接收 `ReviewRunItem[]` 并返回 `{corrections, rejected, review, usedChars}`；它不碰 DOM。审校失败/解析失败/校验不过一律保留主译文，不整段回退；审校服务必须是 LLM（`supportsGlossary !== false`）。
 - 审校是**异步**的：`background.translate()` 只返回主译文 + `reviewCandidates`，**不 await 审校**；content 用 400ms 防抖合并候选，主动发 `review.run`。`reviewProviderId` 默认 `null`，关闭时零请求。
 - **MT-only 门禁**：主 provider 的 `protocol.supportsGlossary !== false`（LLM）时，translate 直接返回 `reviewSkipped: "llm-primary"` 且不给候选。LLM 主翻译不再跑第二层审校；不要恢复 LLM 双跑，除非另加显式开关。
@@ -65,7 +66,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 ## 分批、并发、思考（2026-10 实测）
 
-- 按 provider 策略：LLM 8000 字符 / 400 段 / 8 路；DeepL 3000 / 50 / 4（50 是 DeepL 单请求上限）；商汤 6000 / 300 / 1；微软 MT 5000 / 100 / 4（Azure 单请求上限远高于此，取保守值）；Google 免费接口 1500 / 10 / 1（一次一个 q，必须串行）；Riva 3000 / 10 / 2（协议内部一段一请求，实测多行会并成一段）。
+- 按 provider 策略：LLM 8000 字符 / 400 段 / 8 路；DeepL 3000 / 50 / 4（50 是 DeepL 单请求上限）；商汤 6000 / 300 / 1；微软 MT 5000 / 100 / 4（Azure 单请求上限远高于此，取保守值）；Google 免费接口 1500 / 10 / 1（一次一个 q，必须串行）；Riva 3000 / 10 / 2（协议内部一段一请求，实测多行会并成一段）；Chrome 内置翻译 2000 / 20 / 1（端侧顺序处理）。
 - 视口首屏 / 续翻在上面的策略之上再收紧到 2000 字符 / 60 段（并发不变）：否则首屏候选会攒成一个 8k 大请求，第一批译文要等整批返回。整页模式仍用完整策略。
 - 失败批在主线结束后用 2 路补跑一次，仍失败才计入 `failed`；并发下熔断可能多带最多 `并发数-1` 批。
 - 输出被截断（分段数不符 / JSON 解析失败）时自动二分重试；HTTP 401/429 不拆，避免放大请求。
@@ -78,15 +79,16 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 ## 加翻译服务
 
 1. 预设：`extension/lib/provider-presets.js` 的 `PROVIDER_PRESETS` 加一条（`id/label/protocol/baseUrl/models/supportsModelList/verified`）；`{baseUrl}/models` 不是通用推导时补 `modelsUrl`。
-2. 协议：现有九种（`openai-chat` / `openai-responses` / `anthropic-messages` / `google-gemini` / `microsoft-edge` / `microsoft-azure` / `google-free` / `deepl` / `nvidia-riva`）。新协议加进 `extension/lib/protocols.js` 的 `PROTOCOLS`，并补 `types.d.ts` 的 `ProtocolId`；MT 协议要设 `supportsGlossary: false`。
-3. 需要额外字段（如微软的 `region` / Riva 的 `sourceLang`）时，同时改 `ProviderConfig`、`normalizeSettings` 和设置页卡片。
+2. 协议：现有十种（`openai-chat` / `openai-responses` / `anthropic-messages` / `google-gemini` / `microsoft-edge` / `microsoft-azure` / `google-free` / `deepl` / `nvidia-riva` / `chrome-builtin`）。新协议加进 `extension/lib/protocols.js` 的 `PROTOCOLS`，并补 `types.d.ts` 的 `ProtocolId`；MT 协议要设 `supportsGlossary: false`。
+3. 需要额外字段（如微软的 `region` / Riva、内置翻译的 `sourceLang`）时，同时改 `ProviderConfig`、`normalizeSettings` 和设置页卡片。
+4. 端侧 / DOM-only 能力放 `extension/offscreen.js`（经 offscreen 文档调用），不要塞进 service worker；`chrome-builtin` 就是例子。
 
 设置页按预设渲染，不再依赖 `PROVIDER_TYPES` / `type.fields`（那只是旧调用方的兼容入口）。微软 Edge / Azure 已实现；Index-Translate 只提供本地代理预设。
 
 ## 验证
 
 - `npm run check` —— `tsc -p .`（`noEmit` 在 tsconfig 里）。改完必须零错误。
-- `npm run smoke` —— 协议解析、`response_format` / 思考字段回退、429、模型列表、术语三档、迁移、思考映射、审校候选/预算/二次校验、NVIDIA 两个协议、调试日志脱敏/截断/环形缓冲/导出；stub `fetch`，不联网。
+- `npm run smoke` —— 协议解析、`response_format` / 思考字段回退、429、模型列表、术语三档、迁移、思考映射、审校候选/预算/二次校验、NVIDIA 两个协议、Chrome 内置翻译语言码、调试日志脱敏/截断/环形缓冲/导出；stub `fetch`，不联网。
 - `npm run smoke:dom` —— 假 DOM 加载真实 `content.js`：渲染、还原、双轮、视口/滚动、并发、失败补跑、熔断、进度、异步审校补丁/竞态/撤销、调试事件。
 - 两个冒烟脚本都不支持按用例过滤；单测就临时抽一个用例单独跑，不要改脚本参数硬跑。
 - `npm run build:glossary`；改 allowlist / snapshot / blocklist 后必须再跑 `npm run build:glossary -- --check`。`build:glossary:snapshot` 是维护者手动联网脚本，不参与构建。
@@ -107,12 +109,14 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 不要给 `#sopen-translate-ui` 加 inline `all: initial`：会重置 `position` / `pointer-events`。
 - `response_format` 回退只在 400/404/422；401/403/429 直接上抛，否则一次 429 会变成 8 次请求。
 - Microsoft Edge 是浏览器内部接口：`POST /translate/translatetext?...`，body 是**纯字符串数组**，没有 Authorization；Azure 是 `[{ Text }]` + `Ocp-Apim-Subscription-Key`（区域资源还要 `Ocp-Apim-Subscription-Region`）。两者响应同形，别把 body 混用。
-- Google 免费接口一次只能发一个 `q`，长文本按 ≤1600 字符切开串行请求；本机网络实测不可达，预设只做 stub、不做默认。
+- Google 免费接口一次只能发一个 `q`，长文本按 ≤1600 字符切开串行请求；本机出口实测可达但返回 429，预设只做 stub、不做默认。
 - 双语会跳过含 `PRE/CODE/KBD/SAMP/...` 后代的块（含内联 `<code>`），这是有意的覆盖率损失。
 - 视口判定的 rect 全 0 视为隐藏/未布局；`smoke:dom` 的假 DOM 默认给可见 rect，测视口用例时用 `offscreen(el)` 设置元素 rect。
 - `smoke:dom` 的 `window` / `document` 事件与 `MutationObserver` 都是桩：要触发续翻，用 `fireListener(windowListeners, 'scroll')` 或 `fireMutations(...)`。
 - 叶子容器回退：`div/section/article/main` 没有块级后代且文本 ≥40 字才算一块。
 - `nvidia-riva` 的 system **只能**是语言对（`en-zh-cn`）；塞术语/JSON 指令会被当成正文翻译。它一次只发一段，多行输入会被合并，别为了省请求合并。
+- `chrome-builtin` 的 Translator API **不在 service worker / Web Worker**，只能经 `offscreen.html`；`Translator.create()` 在语言包未下载时需要 user activation（设置页「准备语言包」按钮），offscreen 里直接 create 会抛 `NotAllowedError`。下载完成后才是纯端侧、无网络。
+- Google 免费接口在本机出口实测是 HTTP 429（可达但被限流），不要写成“网络不可达”。
 - 审校补丁只认 content 生成的 segment id；不要把模型返回的 index 直接写回 DOM（index 是 background 送审切片里的位置，不是页面顺序）。
 - `debug.log` 关闭时由 background 静默丢弃；不要在 content 里新增 storage 读取来判断开关。新增日志事件要同时确认脱敏（key/Bearer/URL `key=`/session）与 samples 门禁。
 - 术语层出问题先关掉设置页的「使用内置词库」复现，再判断是渲染、prompt 还是校验。

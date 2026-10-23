@@ -3,7 +3,7 @@
   "name": "sopen-translate",
   "version": "0.2.0",
   "description": "轻量网页整页翻译：翻译服务和 API 密钥由你自己配置。",
-  "permissions": ["storage"],
+  "permissions": ["storage", "offscreen"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",

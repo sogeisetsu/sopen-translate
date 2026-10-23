@@ -15,7 +15,9 @@ export type ProtocolId =
   | 'microsoft-azure'
   | 'google-free'
   /** NVIDIA Riva Translate：专用 MT，system 只发语言对标签 */
-  | 'nvidia-riva';
+  | 'nvidia-riva'
+  /** Chrome / Chromium 端侧内置翻译（Translator API，经 offscreen 文档调用） */
+  | 'chrome-builtin';
 
 export type EnforcementMode = 'fallback' | 'repair' | 'warn';
 export type DisplayMode = 'translation' | 'bilingual';

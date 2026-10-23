@@ -5,7 +5,7 @@
 - **视口优先**：首屏先出译文，滚动、窗口变化、SPA 新内容自动补翻；也能切「整页」一次翻完
 - **术语保护**：品牌 / 型号 / 协议名保持原文，内置词库 + 自定义词表 + 三档漏词策略
 - **纯译文 / 双语**：随时还原，双语只往块内末尾追加 `span`，不破坏表格与列表
-- **18 个内置服务预设**：LLM、DeepL、微软、Google 免费接口、NVIDIA Riva，全部可自定义
+- **19 个内置服务预设**：LLM、DeepL、微软、Google 免费接口、NVIDIA Riva、Chrome 端侧翻译，全部可自定义
 - **可选异步审校**：主译文先渲染，规则筛出的可疑段随后交给第二个 LLM 修正，可查看 diff、可撤销
 - **无后端、无打包、无运行时依赖**：`extension/` 目录就是可加载产物
 
@@ -20,7 +20,7 @@
 1. 打开 `chrome://extensions`（Edge 用 `edge://extensions`），开启「开发者模式」
 2. 「加载已解压的扩展程序」，选择仓库里的 `extension/` 目录
 3. 首次安装会自动打开设置页：
-   - 选一个预设（没有 key 可先用 **Microsoft Edge 翻译**，无需密钥）
+   - 选一个预设（没有 key 可先用 **Microsoft Edge 翻译** 或 **Chrome 内置翻译**；后者首次要点「准备语言包」）
    - 填 API Key → 点「刷新」拉模型 → 点「测试」确认连通 → 保存
 4. 点工具栏图标 → 「翻译」；再点「还原」回到原文
 
@@ -55,7 +55,7 @@
   - `repair`：只重翻漏词段，仍漏才保留原文（默认）；
   - `warn`：译文照常显示，只提示可能漏词。
 - 每批最多把 40 条命中术语注入 prompt，校验也只针对这 40 条。
-- **DeepL、微软翻译、Google 免费接口、NVIDIA Riva 没有 prompt 通道**：扩展对它们完全跳过术语层，不注入、不校验、不回退。
+- **DeepL、微软翻译、Google 免费接口、NVIDIA Riva、Chrome 内置翻译没有 prompt 通道**：扩展对它们完全跳过术语层，不注入、不校验、不回退。
 
 ### 审校（可选，默认关闭）
 
@@ -90,7 +90,7 @@
 
 ## 翻译服务与协议
 
-内置 **18 个预设**，另可添加「自定义」（8 种协议任选）。设置页会标注「已验证 / 接口未实测」。
+内置 **19 个预设**，另可添加「自定义」（10 种协议任选）。设置页会标注「已验证 / 接口未实测」。
 
 | 预设 | 协议 | 验证状态 |
 | --- | --- | --- |
@@ -98,15 +98,16 @@
 | 商汤 SenseNova | OpenAI Chat | 已实测（RPM 较低，自动退避） |
 | DeepL | DeepL | 已实测（不支持术语保护） |
 | Microsoft Edge 翻译 | Microsoft Edge | 已实测（无需 key；内部接口无 SLA） |
+| Chrome 内置翻译（端侧） | chrome-builtin | 接口未实测（需真机下载语言包；桌面版 Chrome/Chromium） |
 | NVIDIA NIM · MiniMax M3.1 Flash | OpenAI Chat | 已实测（`{segments}` + `reasoning_effort=none`） |
 | NVIDIA Riva Translate | nvidia-riva | 已实测（语言对 system；1 段/请求） |
-| Google 免费网页接口 | Google 免费 | 接口未实测（本机网络不可达；非官方） |
+| Google 免费网页接口 | Google 免费 | 接口未实测（非官方；本机出口实测可达但返回 429） |
 | Microsoft Azure Translator | Microsoft Azure | 接口未实测（需要 key + Region） |
 | Index-Translate（本地代理） | OpenAI Chat | 接口未实测（需要本地代理） |
 | OpenAI / DeepSeek / Kimi / 智谱 / 阿里百炼 / MiniMax / OpenRouter / 硅基流动 | OpenAI Chat | 接口未实测 |
-| 自定义 | 8 种协议任选 | 取决于你填的地址 |
+| 自定义 | 10 种协议任选 | 取决于你填的地址 |
 
-协议清单：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`microsoft-edge`、`microsoft-azure`、`google-free`、`deepl`、`nvidia-riva`。
+协议清单：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini`、`microsoft-edge`、`microsoft-azure`、`google-free`、`deepl`、`nvidia-riva`、`chrome-builtin`。
 
 ### NVIDIA 两个预设
 
@@ -114,6 +115,15 @@
 - **NVIDIA Riva Translate**：模型 `nvidia/riva-translate-4b-instruct-v2`，专用翻译模型，**system message 必须是语言对**（如 `en-zh-cn`），不能塞术语或翻译指令。实测多行输入会被合并成一段，因此固定 **1 段/请求**；不发送 `response_format`，也不支持 JSON 输出。短段 1–8s、长段可达数十秒，超时上限 120s。
 - Riva 的源语言在卡片里选；目标语言仍是全局设置。语言对由 `rivaPair()` 映射（`ZH-HANS → zh-cn`、`ZH-HANT → zh-tw`、`ES → es-ES`、`PT → pt-BR`）。
 - 两者的 key 都只从设置页读取，只存在 `chrome.storage.local`。
+
+### Chrome 内置翻译（端侧）
+
+- 走 Chrome / Chromium 自带的 **Translator API**：模型在本机运行，页面文本不出设备，也不需要 key。
+- 首次使用某个语言对时，先在服务卡片点「准备语言包」下载一次；之后直接翻译。语言对由 `builtinLang()` 映射（`ZH-HANS → zh`、`ZH-HANT → zh-Hant`）。
+- Translator API 只在 window 上下文可用，所以扩展用 `offscreen.html` 承载；manifest 里的 `offscreen` 权限只服务这一项。
+- 仅桌面版 Chrome/Chromium 支持；语言包没下载时会提示去设置页准备；不支持的语言对会直接报错。
+- 它和 Chrome 浏览器里“翻译此页”用的云端服务不是同一条路径；想走 Google 的云翻译请用「Google 免费网页接口」。
+- 端侧模型逐段处理，扩展按 2000 字符 / 20 段 / 单路分批，避免一次塞太多。
 
 ### 微软翻译
 
@@ -131,7 +141,7 @@
 
 ```mermaid
 flowchart LR
-  subgraph MT["MT：微软 / DeepL / Google / Riva"]
+  subgraph MT["MT：微软 / DeepL / Google / Riva / Chrome 内置"]
     direction TB
     mt1["收集 / 分批"] --> mt2["术语注入：跳过<br/>无 prompt 通道"]
     mt2 --> mt3["主翻译"]
@@ -185,7 +195,8 @@ flowchart LR
   - LLM 预设：文本 + prompt 发给对应 API；
   - DeepL / Azure / NVIDIA：发给对应厂商；
   - Edge 翻译：发给微软的内部接口；
-  - Google 免费接口：发给 Google 的非官方网页接口。
+  - Google 免费接口：发给 Google 的非官方网页接口；
+  - Chrome 内置翻译：端侧模型在本机运行，页面文本不发出去。
 - **审校**：配置后，可疑段还会发给所选的审校服务（多一个数据流向）；只送规则筛出的段，不送整页。
 - **调试日志**：只写本机存储；不自动上传、不联网；导出文件已脱敏，默认不含页面正文。
 
@@ -205,6 +216,12 @@ flowchart LR
 
 **Riva 报错或很慢**
 ：确认 system 是语言对（设置页会显示预览），源语言与目标语言不能相同；Riva 是专用翻译模型，长段本来就可能数十秒。
+
+**Chrome 内置翻译提示语言包未下载**
+：到设置页该服务卡片点「准备语言包」，等下载完成再翻译；仅桌面版 Chrome/Chromium 支持，语言对不支持时会直接报错。
+
+**Google 免费接口 429**
+：非官方接口，出口 IP 被限流；换网络/代理，或改用 DeepL / 微软 / 自建服务。
 
 **审校没有反应**
 ：审校只对 MT 主翻译生效；LLM 主翻译会直接返回 `reviewSkipped = "llm-primary"`。另外没有可疑段时不会发请求。
@@ -226,51 +243,11 @@ npm run build:glossary             # 离线生成 extension/lib/glossary-data.js
 npm run build:glossary -- --check  # 校验入库词库与源文件一致
 ```
 
-目录：
-
-```text
-extension/                 # chrome://extensions 直接加载这个目录
-  manifest.json
-  background.js            # service worker：消息路由 + 唯一出网口 + 审校预算 + 调试日志写盘
-  content.js               # 渲染、视口续翻、segment id、审校队列 / 补丁 / 撤销
-  content.css              # 浮层样式；.sopen-translated-block 是唯一作用域例外
-  popup.html/js/css        # 工具栏弹窗
-  options.html/js/css      # 设置页
-  theme.css                # options / popup 共用的颜色、间距、圆角、明暗主题
-  lib/
-    settings.js            # 存储、schema 迁移、sessionId
-    languages.js           # 语言唯一来源 + DeepL/微软/Google/Riva 语言码
-    provider-presets.js    # 18 个内置预设 + custom
-    protocols.js           # 9 种协议
-    providers.js           # translateBatch + reviewTranslations
-    review.js              # 候选规则、严重度、二次校验、上下文（纯函数）
-    debug-log.js           # 日志脱敏、截断、环形缓冲、导出（纯函数）
-    http.js                # 超时、429 退避、ProviderError
-    segments.js / prompt.js / models.js / glossary.js
-    ui-tip.js              # ⓘ 信息提示组件（悬停 / 键盘 / 触摸）
-    glossary-data.json     # 内置词库（构建产物）
-scripts/
-  smoke.mjs / dom-smoke.mjs
-  build-glossary.mjs / build-glossary-snapshot.mjs
-```
-
-关键不变量：
-
-- `translate()` / `translateBatch()` 必须原序返回等长数组，数量不符直接抛错。
-- 每轮翻译前先 `resetPage()`；`resetPage()` 必须断开观察器、清空 pending/seen/审校队列并递增 generation。
-- 审校只按 segment id 打补丁；节点断开、generation 不一致时跳过。
-- `content.js` 是 classic script，不能出现 `import`；`background.js` 是唯一读 key 与出网的地方。
-- 行为变化同步更新本文件与 `AGENTS.md`。
-
-真机测试说明：
-
-- Chrome 品牌版可能忽略 `--load-extension`；用 Edge / Chromium 加 `--load-extension` / `--disable-extensions-except`。
-- 从扩展页用 `chrome.tabs.sendMessage` 驱动；content 里发 `chrome.runtime.sendMessage` 到不了 content 自己的监听器。
-- 没有真实 key 时只跑 stub，不要声称端到端通过；Azure / Google 免费接口 / Index-Translate 目前只有 stub 或配置级验证。
+分层、关键不变量、分批策略、加服务步骤和真机测试方法见 [CONTRIBUTING.md](CONTRIBUTING.md)。扩展没有打包步骤，`extension/` 就是产物。
 
 ## 状态
 
-`0.2.0`。已实现：视口优先与整页、纯译文与双语、还原、术语三档、9 种协议、18 个预设、模型刷新、异步审校 + diff/撤销、NVIDIA Riva / MiniMax、明暗主题与 ⓘ 信息提示、本地调试日志。
+`0.2.0`。已实现：视口优先与整页、纯译文与双语、还原、术语三档、10 种协议、19 个预设、模型刷新、异步审校 + diff/撤销、NVIDIA Riva / MiniMax、Chrome 端侧内置翻译、明暗主题与 ⓘ 信息提示、本地调试日志。
 
 尚未实现：划词 / 右键翻译、翻译缓存、快捷键、按站点开关、用量统计、术语指定译法、审校全量评分、NVIDIA 其他模型、G2 Translator API。
 
@@ -280,7 +257,7 @@ scripts/
 - 双语模式跳过含代码的块；SPA 页面建议等渲染完成再点翻译。
 - 长块按句切分会丢一点跨句上下文；单句超 1200 字符硬切。
 - 无限滚动页面会持续产生补翻任务，靠熔断与隐藏暂停兜底。
-- 18 个预设中只有 OpenCode Go / 商汤 / DeepL / Edge / NVIDIA 两个预设做过真 key 端到端；其余为路由级或 stub 验证，baseUrl / 模型名可能过期。
+- 19 个预设中只有 OpenCode Go / 商汤 / DeepL / Edge / NVIDIA 两个预设做过真 key 端到端；Chrome 内置翻译完成了架构验证但未在真机下载语言包；其余为路由级或 stub 验证，baseUrl / 模型名可能过期。
 - 审校只修规则看得见的硬伤，不承诺语义润色；配置后页面文本会多一个数据流向。
 
 ## 许可

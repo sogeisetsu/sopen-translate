@@ -13,7 +13,7 @@ import { getSettings, mergeProviderCaches, saveSettings } from './lib/settings.j
 import { PROVIDER_PRESETS, getPreset } from './lib/provider-presets.js';
 import { PROTOCOL_OPTIONS } from './lib/protocols.js';
 import { resolveModelsUrl } from './lib/models.js';
-import { LANGUAGES, findLanguage, rivaPair } from './lib/languages.js';
+import { LANGUAGES, findLanguage, rivaPair, builtinLang } from './lib/languages.js';
 import { normalizeTerms } from './lib/glossary.js';
 import { buildDebugExport, formatDebugLine } from './lib/debug-log.js';
 import { initTips } from './lib/ui-tip.js';
@@ -263,6 +263,7 @@ const MT_PROTOCOLS = new Set([
   'microsoft-azure',
   'google-free',
   'nvidia-riva',
+  'chrome-builtin',
 ]);
 
 /** @param {ProviderConfig} provider */
@@ -291,6 +292,8 @@ function missingRequired(provider) {
   const preset = getPreset(provider.presetId);
   /** @type {string[]} */
   const missing = [];
+  // 端侧内置翻译没有接口地址、key、模型；只需要语言包
+  if (provider.protocol === 'chrome-builtin') return missing;
   if (!String(provider.baseUrl ?? '').trim()) missing.push('接口地址');
 
   if (provider.protocol === 'microsoft-edge' || provider.protocol === 'google-free') return missing;
@@ -590,6 +593,56 @@ function rivaSourceField(provider, index) {
 }
 
 /**
+ * Chrome 内置翻译的源语言 + 语言对预览。
+ * @param {ProviderConfig} provider
+ * @param {number} index
+ * @returns {HTMLElement}
+ */
+function builtinSourceField(provider, index) {
+  const id = `p-${index}-source`;
+  const current = provider.sourceLang || 'en';
+  const known = LANGUAGES.some((language) => language.id === current);
+  const options = LANGUAGES.map((language) =>
+    h('option', {
+      value: language.id,
+      text: language.name,
+      selected: language.id === current,
+    }),
+  );
+  if (!known) {
+    options.unshift(
+      h('option', {
+        value: current,
+        text: `当前：${current}（不在列表）`,
+        selected: true,
+        disabled: true,
+      }),
+    );
+  }
+
+  const wrapper = fieldGroup({
+    id,
+    label: '源语言',
+    control: h(
+      'select',
+      { class: 'input', id, dataset: { index, field: 'sourceLang' } },
+      ...options,
+    ),
+    tip: '端侧模型按语言对加载：源语言选错，译文会跑偏。首次使用某个语言对时，要点下面的「准备语言包」下载一次。',
+    tipLabel: '内置翻译的语言对',
+    hint: '模型在本机运行，页面文本不会发到任何服务器。',
+  });
+  wrapper.append(
+    h('p', {
+      class: 'field-hint builtin-pair',
+      dataset: { builtinPreview: provider.id },
+      text: `语言对：${builtinLang(current)} → ${builtinLang(currentTarget().code)}`,
+    }),
+  );
+  return wrapper;
+}
+
+/**
  * @param {ProviderConfig} provider
  * @param {number} index
  * @returns {HTMLElement}
@@ -601,7 +654,8 @@ function providerCard(provider, index) {
   const isEdge = provider.protocol === 'microsoft-edge';
   const isAzure = provider.protocol === 'microsoft-azure';
   const isRiva = provider.presetId === 'nvidia-riva';
-  const hideKey = isEdge || provider.protocol === 'google-free';
+  const isBuiltin = provider.protocol === 'chrome-builtin';
+  const hideKey = isEdge || provider.protocol === 'google-free' || isBuiltin;
   const active = getDraft().activeProviderId === provider.id;
   const displayName = provider.label || preset.label;
 
@@ -698,25 +752,29 @@ function providerCard(provider, index) {
 
   if (!isMt) fields.push(modelField(provider, index, preset));
   if (isRiva) fields.push(rivaSourceField(provider, index));
+  if (isBuiltin) fields.push(builtinSourceField(provider, index));
 
   /** @type {HTMLElement[]} */
-  const advancedFields = [
-    fieldGroup({
-      id: `p-${index}-base`,
-      label: 'baseUrl',
-      control: h('input', {
-        class: 'input',
+  const advancedFields = [];
+  if (!isBuiltin) {
+    advancedFields.push(
+      fieldGroup({
         id: `p-${index}-base`,
-        value: provider.baseUrl ?? '',
-        placeholder: preset.baseUrl || 'https://...',
-        spellcheck: false,
-        dataset: { index, field: 'baseUrl' },
+        label: 'baseUrl',
+        control: h('input', {
+          class: 'input',
+          id: `p-${index}-base`,
+          value: provider.baseUrl ?? '',
+          placeholder: preset.baseUrl || 'https://...',
+          spellcheck: false,
+          dataset: { index, field: 'baseUrl' },
+        }),
+        tip: '接口根地址，不要带 /chat/completions。改地址会让模型缓存自动失效；本地代理记得连端口一起填。',
+        tipLabel: 'baseUrl 是什么',
+        hint: preset.baseUrl ? `预设：${preset.baseUrl}` : '',
       }),
-      tip: '接口根地址，不要带 /chat/completions。改地址会让模型缓存自动失效；本地代理记得连端口一起填。',
-      tipLabel: 'baseUrl 是什么',
-      hint: preset.baseUrl ? `预设：${preset.baseUrl}` : '',
-    }),
-  ];
+    );
+  }
 
   if (!isMt) {
     advancedFields.push(
@@ -740,19 +798,29 @@ function providerCard(provider, index) {
 
   if (isCustom) advancedFields.push(protocolField(provider, index));
 
-  const advanced = h(
-    'details',
-    { class: 'advanced', open: isCustom },
-    h('summary', {
-      text: isCustom ? '高级：接口地址与协议' : '高级：自定义接口地址',
-    }),
-    h('div', { class: 'grid' }, ...advancedFields),
-  );
+  const advanced = advancedFields.length
+    ? h(
+        'details',
+        { class: 'advanced', open: isCustom },
+        h('summary', {
+          text: isCustom ? '高级：接口地址与协议' : '高级：自定义接口地址',
+        }),
+        h('div', { class: 'grid' }, ...advancedFields),
+      )
+    : null;
 
   const result = h('span', { class: 'result', role: 'status', 'aria-live': 'polite' });
   const actions = h(
     'div',
     { class: 'provider-actions' },
+    isBuiltin
+      ? h('button', {
+          class: 'btn small',
+          type: 'button',
+          text: '准备语言包',
+          dataset: { action: 'prepare-builtin', index },
+        })
+      : null,
     h('button', {
       class: 'btn small',
       type: 'button',
@@ -774,6 +842,12 @@ function providerCard(provider, index) {
         text: 'Riva 模型固定；不支持术语注入与 JSON 输出；一次只发 1 段，长页面会明显变慢。',
       })
     : null;
+  const builtinNote = isBuiltin
+    ? h('p', {
+        class: 'provider-note',
+        text: '端侧模型：页面文本不出本机。首次使用某个语言对时，先点「准备语言包」完成一次下载。',
+      })
+    : null;
 
   return h(
     'div',
@@ -781,6 +855,7 @@ function providerCard(provider, index) {
     head,
     fields.length ? h('div', { class: 'grid' }, ...fields) : null,
     rivaNote,
+    builtinNote,
     advanced,
     actions,
     preset.hint ? h('p', { class: 'provider-hint', text: preset.hint }) : null,
@@ -832,6 +907,12 @@ function updateRivaPreviews() {
     const provider = draft.providers.find((item) => item.id === node.dataset.rivaPreview);
     if (!provider) continue;
     node.textContent = `语言对：${rivaPair(provider.sourceLang || 'en', targetCode)}`;
+  }
+  for (const node of providersEl.querySelectorAll('[data-builtin-preview]')) {
+    if (!(node instanceof HTMLElement)) continue;
+    const provider = draft.providers.find((item) => item.id === node.dataset.builtinPreview);
+    if (!provider) continue;
+    node.textContent = `语言对：${builtinLang(provider.sourceLang || 'en')} → ${builtinLang(targetCode)}`;
   }
 }
 
@@ -1394,6 +1475,52 @@ providersEl.addEventListener('click', async (event) => {
     return;
   }
 
+  if (button.dataset.action === 'prepare-builtin') {
+    const result = /** @type {HTMLElement | null} */ (
+      button.parentElement?.querySelector('.result') ?? null
+    );
+    if (!result) return;
+    result.classList.remove('is-error');
+    const TranslatorApi = /** @type {any} */ (globalThis).Translator;
+    if (typeof TranslatorApi !== 'function') {
+      result.textContent = '当前浏览器没有内置翻译 API（需要桌面版 Chrome/Chromium）';
+      result.classList.add('is-error');
+      return;
+    }
+
+    const sourceLanguage = builtinLang(provider.sourceLang || 'en');
+    const targetLanguage = builtinLang(currentTarget().code);
+    result.textContent = '正在检查语言包…';
+    button.disabled = true;
+    try {
+      const availability = await TranslatorApi.availability({ sourceLanguage, targetLanguage });
+      if (availability === 'unavailable') {
+        throw new Error(`Chrome 内置翻译不支持 ${sourceLanguage} → ${targetLanguage}`);
+      }
+      if (availability === 'available') {
+        result.textContent = '语言包已就绪，可以翻译';
+        return;
+      }
+      const translator = await TranslatorApi.create({
+        sourceLanguage,
+        targetLanguage,
+        monitor(monitor) {
+          monitor.addEventListener('downloadprogress', (event) => {
+            result.textContent = `下载语言包 ${Math.round((event.loaded ?? 0) * 100)}%…`;
+          });
+        },
+      });
+      translator.destroy?.();
+      result.textContent = '语言包已就绪，可以翻译';
+    } catch (err) {
+      result.textContent = errText(err);
+      result.classList.add('is-error');
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+
   if (button.dataset.action === 'test') {
     const result = /** @type {HTMLElement | null} */ (
       button.parentElement?.querySelector('.result') ?? null
@@ -1440,7 +1567,7 @@ addBtn.addEventListener('click', () => {
     baseUrl: preset.baseUrl,
     model: preset.models[0] || '',
   };
-  if (preset.id === 'nvidia-riva') provider.sourceLang = 'en';
+  if (preset.id === 'nvidia-riva' || preset.id === 'chrome-builtin') provider.sourceLang = 'en';
 
   draft.providers.push(provider);
   if (!draft.activeProviderId) draft.activeProviderId = provider.id;
@@ -1560,7 +1687,12 @@ async function saveDraft() {
 
   // Riva 的源语言即使没动过也落一个默认值，方便以后迁移
   for (const provider of draft.providers) {
-    if (provider.presetId === 'nvidia-riva' && !provider.sourceLang) provider.sourceLang = 'en';
+    if (
+      (provider.presetId === 'nvidia-riva' || provider.presetId === 'chrome-builtin') &&
+      !provider.sourceLang
+    ) {
+      provider.sourceLang = 'en';
+    }
   }
 
   const target = currentTarget();

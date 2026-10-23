@@ -15,7 +15,7 @@ import { loadModelList, parseModelList, resolveModelsUrl } from '../extension/li
 import { normalizeSettings, migrateSettings } from '../extension/lib/settings.js';
 import { compileGlossary, matchTerms, modelTokens } from '../extension/lib/glossary.js';
 import { reasoningOffParams } from '../extension/lib/reasoning.js';
-import { googleCode, microsoftCode, rivaPair } from '../extension/lib/languages.js';
+import { googleCode, microsoftCode, rivaPair, builtinLang } from '../extension/lib/languages.js';
 import {
   DEBUG_LOG_MAX_ENTRIES,
   appendDebugEntry,
@@ -1601,6 +1601,36 @@ await test('debug 样本：最多 120 字且脱敏', () => {
   const text = sampleText(`${'长'.repeat(200)} key=SECRET123`);
   assert.ok(text.length <= 121, `样本应截断到 120 字，实际 ${text.length}`);
   assert.doesNotMatch(text, /SECRET123/);
+});
+
+/* --------------------------- Chrome 内置翻译 --------------------------- */
+
+await test('chrome-builtin：语言码映射与扩展外错误', async () => {
+  assert.equal(builtinLang('zh-Hans'), 'zh');
+  assert.equal(builtinLang('ZH-HANS'), 'zh');
+  assert.equal(builtinLang('zh-Hant'), 'zh-Hant');
+  assert.equal(builtinLang('EN-US'), 'en');
+  assert.equal(builtinLang('ja'), 'ja');
+  assert.equal(builtinLang(undefined), 'en');
+  assert.equal(builtinLang('xx'), 'xx');
+
+  const protocol = getProviderType('chrome-builtin');
+  assert.equal(protocol.supportsGlossary, false);
+  await assert.rejects(
+    () =>
+      protocol.translate({
+        texts: ['Hello'],
+        config: {
+          id: 'b',
+          presetId: 'chrome-builtin',
+          protocol: 'chrome-builtin',
+          sourceLang: 'en',
+        },
+        target: '简体中文',
+        targetCode: 'ZH-HANS',
+      }),
+    /Chrome 内置翻译/,
+  );
 });
 
 if (failures > 0) {
