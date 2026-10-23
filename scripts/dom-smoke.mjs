@@ -295,6 +295,7 @@ const fakeDocument = {
 
 let displayMode = 'translation';
 let translateScope = 'viewport';
+let debugSamplesFlag = false;
 let translator = (text) => text;
 /** @type {null | ((texts: string[], call: number) => any)} */
 let responder = null;
@@ -306,6 +307,8 @@ let reviewResponder = null;
 let reviewGate = null;
 /** @type {any[]} */
 const reviewCalls = [];
+/** @type {any[]} */
+const debugCalls = [];
 /** @type {((message: any, sender: any, sendResponse: any) => any) | null} */
 let listener = null;
 /** @type {string[]} */
@@ -358,6 +361,10 @@ globalThis.chrome = {
           },
         };
       }
+      if (message.type === 'debug.log') {
+        debugCalls.push(message);
+        return { ok: true, skipped: true };
+      }
       calls += 1;
       if (gate) await gate;
       seen.push(...message.texts);
@@ -383,6 +390,7 @@ globalThis.chrome = {
             translateScope,
             targetLang: '简体中文',
             targetLangCode: 'ZH-HANS',
+            debugLogSamples: debugSamplesFlag,
           },
         };
       },
@@ -445,6 +453,7 @@ async function resetPageStub() {
   resetBody();
   displayMode = 'translation';
   translateScope = 'viewport';
+  debugSamplesFlag = false;
   fakeDocument.hidden = false;
   windowListeners.clear();
   documentListeners.clear();
@@ -455,6 +464,7 @@ async function resetPageStub() {
   reviewResponder = null;
   reviewGate = null;
   reviewCalls.length = 0;
+  debugCalls.length = 0;
   seen.length = 0;
   calls = 0;
 }
@@ -1175,6 +1185,61 @@ await test('异步审校：LLM 主翻译 / 空候选都不产生 review.run', as
   await send({ type: 'page.translate' });
   await sleep(600);
   assert.equal(reviewCalls.length, 0, '空候选不应发审校请求');
+});
+
+await test('调试日志：content 记录翻译/审校/还原事件，默认不带页面文本', async () => {
+  await resetPageStub();
+  const para = el('p', 'Kubernetes runs containers.');
+  resetBody(para);
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewCandidates: [{ index: 0, reasons: ['term'], missing: ['Kubernetes'] }],
+  });
+
+  await send({ type: 'page.translate' });
+  await waitFor(() => debugCalls.some((call) => call.event === 'review.end'), 3000);
+
+  const events = debugCalls.map((call) => call.event);
+  for (const event of ['page.translate.start', 'page.translate.end', 'review.start', 'review.end']) {
+    assert.ok(events.includes(event), `缺少 ${event}`);
+  }
+  assert.ok(
+    debugCalls.every((call) => call.source === 'content'),
+    '来源必须是 content',
+  );
+  assert.ok(
+    debugCalls.every((call) => call.sample === undefined),
+    '默认不应携带页面文本样本',
+  );
+  const start = debugCalls.find((call) => call.event === 'page.translate.start');
+  assert.equal(start.data.scope, 'viewport');
+  assert.equal(start.data.target, 'ZH-HANS');
+
+  await send({ type: 'page.restore' });
+  assert.ok(debugCalls.some((call) => call.event === 'page.restore'));
+});
+
+await test('调试日志：开启 samples 才附带 120 字以内的样本', async () => {
+  await resetPageStub();
+  debugSamplesFlag = true;
+  const para = el('p', 'Kubernetes runs containers.');
+  resetBody(para);
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewCandidates: [{ index: 0, reasons: ['term'], missing: ['Kubernetes'] }],
+  });
+
+  await send({ type: 'page.translate' });
+  await waitFor(() => debugCalls.some((call) => call.event === 'review.start'), 3000);
+  const review = debugCalls.find((call) => call.event === 'review.start');
+  assert.equal(review.sample.source, 'Kubernetes runs containers.');
+  assert.equal(review.sample.primary, '中:Kubernetes runs containers.');
 });
 
 if (failures > 0) {

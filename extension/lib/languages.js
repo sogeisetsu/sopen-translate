@@ -64,3 +64,44 @@ export function googleCode(nameOrCode) {
   const raw = String(nameOrCode ?? '').trim();
   return raw || 'en';
 }
+
+/**
+ * NVIDIA Riva 的语言标签表。Riva 的 system message 只接受 `<src>-<tgt>`，
+ * 例如 `en-zh-cn`；传自然语言会破坏语言对，所以这里必须精确映射。
+ * @type {Record<string, string>}
+ */
+const RIVA_TAGS = {
+  'zh-Hans': 'zh-cn',
+  'zh-Hant': 'zh-tw',
+  ja: 'ja',
+  ko: 'ko',
+  en: 'en',
+  fr: 'fr',
+  de: 'de',
+  es: 'es-ES',
+  ru: 'ru',
+  pt: 'pt-BR',
+};
+
+/**
+ * @param {string | undefined | null} value
+ * @returns {string}
+ */
+function rivaTag(value) {
+  const language = findLanguage(value);
+  if (language && RIVA_TAGS[language.id]) return RIVA_TAGS[language.id];
+  const raw = String(value ?? '').trim();
+  if (RIVA_TAGS[raw]) return RIVA_TAGS[raw];
+  // 已经是 Riva 形式（en / zh-cn）就直接用；其余回落到原值小写
+  return raw.toLowerCase() || 'en';
+}
+
+/**
+ * Riva 的 system 语言对：`rivaPair('en', 'ZH-HANS') → 'en-zh-cn'`。
+ * @param {string | undefined | null} sourceLang
+ * @param {string | undefined | null} targetCode
+ * @returns {string}
+ */
+export function rivaPair(sourceLang, targetCode) {
+  return `${rivaTag(sourceLang)}-${rivaTag(targetCode)}`;
+}

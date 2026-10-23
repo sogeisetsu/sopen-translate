@@ -13,7 +13,7 @@ import { ProviderError, clip, fail, getJson, joinUrl, postJson } from './http.js
 import { parseSegments } from './segments.js';
 import { reasoningOffParams } from './reasoning.js';
 import { buildRepairSystemPrompt, buildSystemPrompt, buildUserPayload } from './prompt.js';
-import { googleCode, microsoftCode } from './languages.js';
+import { googleCode, microsoftCode, rivaPair } from './languages.js';
 
 /** 已经证明不支持思考开关的配置（preset|baseUrl|model），避免每批都 400 一次 */
 const reasoningUnsupported = new Set();
@@ -388,6 +388,58 @@ const microsoftAzure = {
   },
 };
 
+/* ------------------------------ nvidia-riva ------------------------------ */
+
+/**
+ * NVIDIA Riva Translate：专用翻译模型，不是通用指令模型。
+ * system message **必须**是语言对标签（`en-zh-cn`），不能塞术语或翻译指令；
+ * 用户内容就是一段原文，响应是纯文本。
+ *
+ * 一次一个 q：未验证多段/JSON 行为前不合并请求（见计划 H6 spike）。
+ * @type {Protocol}
+ */
+const nvidiaRiva = {
+  id: 'nvidia-riva',
+  label: 'NVIDIA Riva Translate',
+  supportsGlossary: false,
+  buildRequest(args) {
+    const text = args.texts[0] ?? '';
+    return {
+      url: joinUrl(args.config.baseUrl, '/chat/completions'),
+      headers: llmHeaders(args),
+      body: {
+        model: args.config.model,
+        temperature: 0,
+        max_tokens: 4096,
+        messages: [
+          { role: 'system', content: rivaPair(args.config.sourceLang, args.targetCode || args.target) },
+          { role: 'user', content: text },
+        ],
+      },
+    };
+  },
+  parseResponse(json) {
+    const text = openaiChatContent(json).trim();
+    if (!text) fail('Riva 返回为空');
+    return [text];
+  },
+  async translate(args) {
+    /** @type {string[]} */
+    const out = [];
+    for (const text of args.texts) {
+      const request = nvidiaRiva.buildRequest({ ...args, texts: [text] });
+      const data = await postJson(request.url, {
+        headers: request.headers,
+        body: request.body,
+        timeoutMs: 120000,
+        retryDelays: args.retry?.delays,
+      });
+      out.push(nvidiaRiva.parseResponse(data)[0] ?? '');
+    }
+    return out;
+  },
+};
+
 /* ---------------------------- Google 免费接口 ---------------------------- */
 
 /** 非官方网页接口一次只接受一个 q；超过这个长度就按句切开串行请求 */
@@ -541,6 +593,7 @@ export const PROTOCOLS = {
   'microsoft-edge': microsoftEdge,
   'microsoft-azure': microsoftAzure,
   'google-free': googleFree,
+  'nvidia-riva': nvidiaRiva,
   deepl,
 };
 

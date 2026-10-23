@@ -24,6 +24,7 @@ import {
   pageKind,
   selectReviewItems,
 } from './lib/review.js';
+import { appendDebugEntry, makeDebugEntry, sampleText } from './lib/debug-log.js';
 
 /** @typedef {import('../types').ProviderConfig} ProviderConfig */
 /** @typedef {import('../types').Settings} Settings */
@@ -63,27 +64,164 @@ function reviewBudget(token) {
   return budget;
 }
 
+/* ------------------------------- 调试日志 ------------------------------- */
+
+/** 开启状态缓存：避免每条日志都读一次 settings；设置一变就清空 */
+/** @type {boolean | null} */
+let debugEnabledCache = null;
+/** 串行写盘：多个 context 同时 debug.log 时不能互相覆盖 */
+let debugWriteQueue = Promise.resolve();
+
+/**
+ * @param {unknown} err
+ * @returns {Record<string, unknown>}
+ */
+function errorData(err) {
+  const anyError = /** @type {{ status?: unknown, name?: unknown, message?: unknown }} */ (err);
+  const message = String(anyError?.message ?? err);
+  const host = message.match(/https?:\/\/([^/\s:]+)/)?.[1];
+  return {
+    name: String(anyError?.name ?? 'Error'),
+    ...(Number.isInteger(anyError?.status) ? { status: anyError.status } : {}),
+    ...(host ? { host } : {}),
+  };
+}
+
+/**
+ * 写一条调试日志。关闭时是零写入；任何异常都吞掉，不能影响翻译。
+ * @param {Record<string, any>} input
+ * @param {chrome.runtime.MessageSender} [sender]
+ * @returns {Promise<{ ok: boolean, skipped?: boolean }>}
+ */
+async function logDebug(input, sender) {
+  try {
+    const settings = await getSettings();
+    if (!settings.debugLogEnabled) return { ok: true, skipped: true };
+
+    /** @type {Record<string, any>} */
+    const payload = { ...input };
+    const tab = sender?.tab;
+    if (Number.isInteger(tab?.id)) payload.tabId = tab?.id;
+    if (tab?.url && !payload.url) payload.url = tab.url;
+    if (payload.sample) {
+      const sample = payload.sample;
+      delete payload.sample;
+      // 只有显式开启 samples 才把页面文本写进日志
+      if (settings.debugLogSamples) {
+        payload.data = {
+          ...(payload.data || {}),
+          sample: {
+            source: sampleText(sample.source),
+            primary: sampleText(sample.primary),
+          },
+        };
+      }
+    }
+
+    const entry = makeDebugEntry(payload);
+    const task = debugWriteQueue.then(async () => {
+      const stored = await chrome.storage.local.get('debugLog');
+      const entries = appendDebugEntry(
+        Array.isArray(stored.debugLog)
+          ? /** @type {import('../types').DebugLogEntry[]} */ (stored.debugLog)
+          : [],
+        entry,
+      );
+      await chrome.storage.local.set({ debugLog: entries });
+    });
+    debugWriteQueue = task.catch(() => {});
+    await task;
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * @param {unknown} limit
+ */
+async function getDebugLog(limit) {
+  const settings = await getSettings();
+  const stored = await chrome.storage.local.get('debugLog');
+  const entries = Array.isArray(stored.debugLog) ? stored.debugLog : [];
+  const max =
+    Number.isInteger(limit) && Number(limit) > 0
+      ? Math.min(Number(limit), entries.length)
+      : entries.length;
+  return {
+    ok: true,
+    enabled: settings.debugLogEnabled,
+    samples: settings.debugLogSamples,
+    entries: entries.slice(-max),
+  };
+}
+
+async function clearDebugLog() {
+  await chrome.storage.local.set({ debugLog: [] });
+  return { ok: true };
+}
+
+/** @param {unknown} err */
+function markLogged(err) {
+  if (err && typeof err === 'object') {
+    try {
+      /** @type {Record<string, unknown>} */ (err).__logged = true;
+    } catch {
+      /* 冻结对象等忽略 */
+    }
+  }
+}
+
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  void logDebug({
+    level: 'info',
+    event: 'app.start',
+    source: 'background',
+    message: `onInstalled:${reason}`,
+  });
   if (reason !== 'install') return;
   const settings = await getSettings();
   if (settings.providers.length === 0) chrome.runtime.openOptionsPage();
 });
 
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.settings) glossaryCache = null;
+chrome.runtime.onStartup.addListener(() => {
+  void logDebug({
+    level: 'info',
+    event: 'app.start',
+    source: 'background',
+    message: 'onStartup',
+  });
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  const task = route(message);
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes.settings) {
+    glossaryCache = null;
+    debugEnabledCache = null;
+  }
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const task = route(message, sender);
   if (!task) return false;
-  task.then(sendResponse, (err) =>
-    sendResponse({ ok: false, error: err?.message || String(err) }),
-  );
+  task.then(sendResponse, (err) => {
+    // 统一记一次错误；不记录请求头/响应体
+    if (!/** @type {any} */ (err)?.__logged) {
+      void logDebug({
+        level: 'error',
+        event: 'error',
+        source: 'background',
+        message: err?.message || String(err),
+        data: errorData(err),
+      });
+    }
+    sendResponse({ ok: false, error: err?.message || String(err) });
+  });
   return true; // 保持通道等异步结果
 });
 
 /** 只处理自己认识的消息，其余交回给别的监听者 */
-function route(message) {
+function route(message, sender) {
   switch (message?.type) {
     case 'translate':
       return translate(message.texts, message.pageToken);
@@ -95,6 +233,12 @@ function route(message) {
       return status();
     case 'models.list':
       return listModels(message.provider);
+    case 'debug.log':
+      return logDebug(message, sender);
+    case 'debug.get':
+      return getDebugLog(message?.limit);
+    case 'debug.clear':
+      return clearDebugLog();
     default:
       return null;
   }
@@ -261,6 +405,13 @@ async function runReview(message) {
 
   const glossary = await getGlossaryTerms(settings);
   const url = String(message?.context?.url ?? '');
+  void logDebug({
+    level: 'info',
+    event: 'review.start',
+    source: 'background',
+    message: `${picked.length} 段`,
+    data: { items: picked.length, host: hostOf(url), truncated },
+  });
   const reviewed = await reviewTranslations({
     items: picked,
     config: reviewProvider,
@@ -284,6 +435,20 @@ async function runReview(message) {
   budget.segments += reviewed.review.reviewed;
   budget.chars += reviewed.usedChars;
   budget.at = Date.now();
+
+  void logDebug({
+    level: reviewed.review.failed ? 'warn' : 'info',
+    event: reviewed.review.failed ? 'review.failed' : 'review.end',
+    source: 'background',
+    message: reviewed.review.failed ? '审校失败，保留主译文' : 'ok',
+    data: {
+      reviewed: reviewed.review.reviewed,
+      corrected: reviewed.review.corrected,
+      rejected: reviewed.rejected.length,
+      truncated: reviewed.review.truncated || truncated,
+      chars: reviewed.usedChars,
+    },
+  });
 
   return {
     ok: true,
@@ -333,14 +498,47 @@ async function testProvider(config, sample) {
   const extraHeaders = await sessionHeaders(config);
 
   const started = Date.now();
-  const result = await translateBatch({
-    texts,
-    config,
-    target: settings.targetLang,
-    targetCode: settings.targetLangCode,
-    glossary: [],
-    enforcement: 'warn',
-    extraHeaders,
+  /** @type {import('../types').TranslateBatchResult} */
+  let result;
+  try {
+    result = await translateBatch({
+      texts,
+      config,
+      target: settings.targetLang,
+      targetCode: settings.targetLangCode,
+      glossary: [],
+      enforcement: 'warn',
+      extraHeaders,
+    });
+  } catch (err) {
+    markLogged(err);
+    void logDebug({
+      level: 'error',
+      event: 'provider.test',
+      source: 'background',
+      message: String(/** @type {any} */ (err)?.message ?? err),
+      data: {
+        ...errorData(err),
+        presetId: config.presetId,
+        protocol: config.protocol,
+        model: config.model,
+        elapsed: Date.now() - started,
+      },
+    });
+    throw err;
+  }
+
+  void logDebug({
+    level: 'info',
+    event: 'provider.test',
+    source: 'background',
+    message: 'ok',
+    data: {
+      presetId: config.presetId,
+      protocol: config.protocol,
+      model: config.model,
+      elapsed: Date.now() - started,
+    },
   });
 
   return {

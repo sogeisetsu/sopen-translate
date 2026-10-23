@@ -15,7 +15,18 @@ import { loadModelList, parseModelList, resolveModelsUrl } from '../extension/li
 import { normalizeSettings, migrateSettings } from '../extension/lib/settings.js';
 import { compileGlossary, matchTerms, modelTokens } from '../extension/lib/glossary.js';
 import { reasoningOffParams } from '../extension/lib/reasoning.js';
-import { googleCode, microsoftCode } from '../extension/lib/languages.js';
+import { googleCode, microsoftCode, rivaPair } from '../extension/lib/languages.js';
+import {
+  DEBUG_LOG_MAX_ENTRIES,
+  appendDebugEntry,
+  buildDebugExport,
+  formatDebugLine,
+  makeDebugEntry,
+  redactText,
+  sampleText,
+  summarizeSettings,
+  truncateEntry,
+} from '../extension/lib/debug-log.js';
 import {
   applyReviewCorrections,
   findSuspicious,
@@ -1346,6 +1357,250 @@ await test('parseReviewResponse / pageKind / severityOf', async () => {
 
   assert.ok(severityOf(['empty']) > severityOf(['term']));
   assert.ok(severityOf(['term']) > severityOf(['length']));
+});
+
+/* ------------------------------ NVIDIA ------------------------------ */
+
+const rivaConfig = {
+  id: 'riva',
+  presetId: 'nvidia-riva',
+  protocol: 'nvidia-riva',
+  baseUrl: 'https://integrate.api.nvidia.com/v1',
+  model: 'nvidia/riva-translate-4b-instruct-v2',
+  apiKey: 'k',
+  sourceLang: 'en',
+};
+
+await test('nvidia-riva：system 只发语言对、一段一请求、不发 response_format', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: String(url), body, headers: init.headers });
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: ' Kubernetes 运行容器。 ' } }] }),
+      { status: 200 },
+    );
+  };
+
+  const out = await getProviderType('nvidia-riva').translate({
+    texts: ['Kubernetes runs containers.', 'Hello world'],
+    config: rivaConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+  });
+
+  assert.deepEqual(out, ['Kubernetes 运行容器。', 'Kubernetes 运行容器。']);
+  assert.equal(calls.length, 2, 'Riva 固定一段一请求');
+  assert.equal(calls[0].url, 'https://integrate.api.nvidia.com/v1/chat/completions');
+  assert.equal(calls[0].body.messages[0].content, 'en-zh-cn');
+  assert.equal(calls[0].body.messages[1].content, 'Kubernetes runs containers.');
+  assert.equal(calls[0].body.response_format, undefined, 'Riva 不承诺 JSON，不能发 response_format');
+  assert.equal(calls[0].body.temperature, 0);
+  assert.equal(calls[0].body.max_tokens, 4096);
+  assert.equal(calls[0].headers.Authorization, 'Bearer k');
+});
+
+await test('rivaPair：语言 id / 代码 / 老值都能拼成语言对', async () => {
+  assert.equal(rivaPair('en', 'ZH-HANS'), 'en-zh-cn');
+  assert.equal(rivaPair('EN-US', 'ZH-HANT'), 'en-zh-tw');
+  assert.equal(rivaPair('zh-Hans', 'EN-US'), 'zh-cn-en');
+  assert.equal(rivaPair('ja', 'KO'), 'ja-ko');
+  assert.equal(rivaPair(undefined, 'ZH-HANS'), 'en-zh-cn');
+  assert.equal(rivaPair('en', 'es'), 'en-es-ES');
+  assert.equal(rivaPair('en', 'pt'), 'en-pt-BR');
+  assert.equal(rivaPair('en', 'xx'), 'en-xx');
+});
+
+await test('nvidia-riva + glossary：不注入、不校验、不回退', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: '', body, headers: init.headers });
+    // 故意丢掉术语：MT 协议不做术语校验
+    return new Response(JSON.stringify({ choices: [{ message: { content: '运行容器' } }] }), {
+      status: 200,
+    });
+  };
+
+  const result = await translateBatch({
+    texts: ['Kubernetes runs containers.'],
+    config: rivaConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+    enforcement: 'fallback',
+  });
+
+  assert.deepEqual(result.translations, ['运行容器']);
+  assert.equal(result.protected, 0);
+  assert.equal(calls[0].body.messages[0].content, 'en-zh-cn', 'system 不能变成术语 prompt');
+});
+
+await test('nvidia：MiniMax 走 OpenAI Chat，{segments} 解析 + reasoning 400 回退', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: '', body, headers: init.headers });
+    if ('reasoning_effort' in body) {
+      return new Response('{"error":"unsupported reasoning_effort"}', { status: 400 });
+    }
+    const segments = JSON.parse(body.messages[1].content).segments;
+    return new Response(
+      JSON.stringify({
+        choices: [
+          { message: { content: JSON.stringify({ segments: segments.map((s) => `译:${s}`) }) } },
+        ],
+      }),
+      { status: 200 },
+    );
+  };
+
+  const config = {
+    id: 'nvidia',
+    presetId: 'nvidia',
+    protocol: 'openai-chat',
+    baseUrl: 'https://integrate.api.nvidia.com/v1',
+    model: 'minimaxai/minimax-m3.1-flash',
+    apiKey: 'k',
+  };
+  const result = await translateBatch({
+    texts: ['Hello world'],
+    config,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: [],
+    enforcement: 'warn',
+  });
+
+  assert.deepEqual(result.translations, ['译:Hello world']);
+  assert.equal(calls.length, 2, '先发思考字段，400 后只去掉它');
+  assert.equal(calls[0].body.reasoning_effort, 'none');
+  assert.equal(calls[0].body.response_format.type, 'json_object');
+  assert.equal('reasoning_effort' in calls[1].body, false);
+  assert.equal(calls[1].body.response_format.type, 'json_object');
+  assert.equal(reasoningOffParams('nvidia', 'minimaxai/minimax-m3.1-flash').reasoning_effort, 'none');
+});
+
+/* ------------------------------ 调试日志 ------------------------------ */
+
+await test('debug 脱敏：Bearer / apiKey / URL key / session / DeepL 都不能原样出现', async () => {
+  const text = redactText(
+    [
+      'Authorization: Bearer sk-abcdef1234567890',
+      '{"apiKey":"nvapi-abcdefgh12345678"}',
+      'GET https://generativelanguage.googleapis.com/v1/models/x:generateContent?key=AIzaSySECRET123&alt=json',
+      'x-opencode-session: 1234-abcd-5678',
+      'DeepL-Auth-Key 12345678-1234-1234-1234-123456789012:fx',
+      'Ocp-Apim-Subscription-Key: abcdef123456',
+    ].join('\n'),
+  );
+  assert.doesNotMatch(text, /sk-abcdef/);
+  assert.doesNotMatch(text, /nvapi-abcdef/);
+  assert.doesNotMatch(text, /AIzaSySECRET/);
+  assert.doesNotMatch(text, /1234-abcd-5678/);
+  assert.doesNotMatch(text, /12345678-1234-1234/);
+  assert.doesNotMatch(text, /abcdef123456/);
+  assert.match(text, /Bearer \*\*\*/);
+  assert.match(text, /key=\*\*\*/);
+});
+
+await test('debug 条目：时间戳 / 备注 / 数据递归脱敏', async () => {
+  const entry = makeDebugEntry({
+    now: Date.UTC(2026, 9, 23, 12, 34, 56, 789),
+    level: 'info',
+    event: 'user.note',
+    source: 'options',
+    message: '点了翻译',
+    note: '这里开始 429',
+    data: {
+      provider: 'nvidia-riva',
+      apiKey: 'nvapi-secret-value',
+      nested: { authorization: 'Bearer abcdef123456', model: 'riva' },
+      chars: 602,
+    },
+  });
+  assert.equal(entry.v, 1);
+  assert.equal(entry.ts, '2026-10-23T12:34:56.789Z');
+  assert.equal(entry.note, '这里开始 429');
+  assert.equal(entry.source, 'options');
+  assert.equal(entry.data?.apiKey, '***');
+  assert.equal(/** @type {any} */ (entry.data?.nested).authorization, '***');
+  assert.equal(entry.data?.chars, 602);
+  assert.match(formatDebugLine(entry), /^12:34:56 INFO {2}user\.note/);
+});
+
+await test('debug 截断：单条超过 8KB 先丢 data，再截 message', async () => {
+  const huge = makeDebugEntry({
+    event: 'error',
+    message: 'x'.repeat(20000),
+    data: { blob: 'y'.repeat(20000) },
+  });
+  assert.equal(huge.data, undefined);
+  assert.ok(JSON.stringify(huge).length <= 8 * 1024);
+  assert.ok(String(huge.message).length < 1000);
+
+  const small = makeDebugEntry({ event: 'ok', message: 'fine' });
+  assert.deepEqual(truncateEntry(small), small);
+});
+
+await test('debug 环形缓冲：超过 500 条只保留最新', async () => {
+  /** @type {import('../types').DebugLogEntry[]} */
+  let entries = [];
+  for (let index = 0; index < DEBUG_LOG_MAX_ENTRIES + 12; index += 1) {
+    entries = appendDebugEntry(entries, makeDebugEntry({ event: 'tick', message: String(index) }));
+  }
+  assert.equal(entries.length, DEBUG_LOG_MAX_ENTRIES);
+  assert.equal(entries[0].message, '12');
+  assert.equal(entries[entries.length - 1].message, String(DEBUG_LOG_MAX_ENTRIES + 11));
+});
+
+await test('debug 导出：可 JSON.parse、含版本/UA/设置摘要、无密钥与正文', async () => {
+  const settings = {
+    ...normalizeSettings({}),
+    debugLogEnabled: true,
+    debugLogSamples: false,
+    activeProviderId: 'p1',
+    providers: [
+      {
+        id: 'p1',
+        presetId: 'nvidia-riva',
+        protocol: 'nvidia-riva',
+        model: 'nvidia/riva-translate-4b-instruct-v2',
+        apiKey: 'nvapi-do-not-leak',
+        baseUrl: 'https://integrate.api.nvidia.com/v1',
+      },
+    ],
+  };
+  const entries = [makeDebugEntry({ event: 'app.start', source: 'background' })];
+  const payload = buildDebugExport({
+    entries,
+    settings,
+    appVersion: '0.2.0',
+    ua: 'Mozilla/5.0',
+    samples: false,
+    now: Date.UTC(2026, 9, 23),
+  });
+  const text = JSON.stringify(payload);
+  assert.doesNotMatch(text, /nvapi-do-not-leak/);
+  assert.equal(payload.samples, false);
+  assert.equal(payload.appVersion, '0.2.0');
+  assert.equal(/** @type {any} */ (payload.settings).activeProvider.hasKey, true);
+  assert.equal(/** @type {any} */ (payload.settings).activeProvider.model, 'nvidia/riva-translate-4b-instruct-v2');
+  assert.equal(payload.entries.length, 1);
+  assert.doesNotThrow(() => JSON.parse(text));
+
+  const summary = summarizeSettings(settings);
+  assert.equal(summary.providerCount, undefined, '摘要不暴露无意义字段');
+  assert.equal(/** @type {any} */ (summary).debugLogEnabled, true);
+});
+
+await test('debug 样本：最多 120 字且脱敏', () => {
+  const text = sampleText(`${'长'.repeat(200)} key=SECRET123`);
+  assert.ok(text.length <= 121, `样本应截断到 120 字，实际 ${text.length}`);
+  assert.doesNotMatch(text, /SECRET123/);
 });
 
 if (failures > 0) {

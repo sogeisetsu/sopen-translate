@@ -122,6 +122,8 @@
     /** 本轮的目标语言：审校请求要用，跟主翻译保持同一代设置 */
     target: '',
     targetCode: '',
+    /** 设置里的样本开关；每轮只读一次，避免每条日志都问后台 */
+    debugSamples: false,
     /**
      * 审校代次：每次 resetPage 递增。晚到的 review 响应 generation 不一致就丢弃，
      * 否则会出现“已还原的页面上又被写回一句译文”。
@@ -158,6 +160,38 @@
 
   /** @param {unknown} err @returns {string} */
   const errorText = (err) => (err instanceof Error ? err.message : String(err));
+
+  /* ------------------------------- 调试日志 ------------------------------- */
+
+  /**
+   * 发一条调试日志。关闭时 background 直接忽略，content 不需要读设置；
+   * 发送失败（页面正在卸载等）也绝不能影响翻译。
+   * @param {'info' | 'warn' | 'error'} level
+   * @param {string} event
+   * @param {string} [message]
+   * @param {Record<string, unknown>} [data]
+   * @param {{ source?: string, primary?: string }} [sample]
+   */
+  function logEvent(level, event, message, data, sample) {
+    try {
+      void chrome.runtime.sendMessage({
+        type: 'debug.log',
+        level,
+        event,
+        source: 'content',
+        ...(message ? { message } : {}),
+        data: {
+          mode: state.mode,
+          scope: state.scope,
+          target: state.targetCode,
+          ...(data || {}),
+        },
+        ...(state.debugSamples && sample ? { sample } : {}),
+      });
+    } catch {
+      /* 日志失败不影响翻译 */
+    }
+  }
 
   /* ------------------------------- 后台调用 ------------------------------- */
 
@@ -824,6 +858,7 @@
   function restorePage() {
     if (state.busy) return { ok: false, error: '正在翻译中，等这一轮结束再还原' };
     const count = state.injected.length + state.originals.length;
+    logEvent('info', 'page.restore', undefined, { count });
     resetPage();
     hideToast();
     return { ok: true, restored: count };
@@ -833,11 +868,11 @@
 
   /**
    * 模式、范围、目标语言同一次读取，避免几套逻辑读到不同代的设置。
-   * @returns {Promise<{ mode: 'translation' | 'bilingual', scope: 'viewport' | 'whole', target: string, targetCode: string }>}
+   * @returns {Promise<{ mode: 'translation' | 'bilingual', scope: 'viewport' | 'whole', target: string, targetCode: string, samples: boolean }>}
    */
   async function readPageSettings() {
     try {
-      const data = /** @type {{ settings?: { displayMode?: string, translateScope?: string, targetLang?: string, targetLangCode?: string } }} */ (
+      const data = /** @type {{ settings?: { displayMode?: string, translateScope?: string, targetLang?: string, targetLangCode?: string, debugLogSamples?: boolean } }} */ (
         await chrome.storage.local.get('settings')
       );
       const settings = data.settings || {};
@@ -846,9 +881,10 @@
         scope: settings.translateScope === 'whole' ? 'whole' : 'viewport',
         target: typeof settings.targetLang === 'string' ? settings.targetLang : '',
         targetCode: typeof settings.targetLangCode === 'string' ? settings.targetLangCode : '',
+        samples: settings.debugLogSamples === true,
       };
     } catch {
-      return { mode: 'translation', scope: 'viewport', target: '', targetCode: '' };
+      return { mode: 'translation', scope: 'viewport', target: '', targetCode: '', samples: false };
     }
   }
 
@@ -951,6 +987,16 @@
     state.reviewInFlight = true;
     const generation = state.generation;
     const batch = state.reviewQueue.splice(0, REVIEW_QUEUE_MAX);
+    logEvent(
+      'info',
+      'review.start',
+      undefined,
+      {
+        items: batch.length,
+        chars: batch.reduce((sum, item) => sum + item.source.length + item.primary.length, 0),
+      },
+      { source: batch[0]?.source, primary: batch[0]?.primary },
+    );
 
     try {
       const res = await chrome.runtime.sendMessage({
@@ -979,8 +1025,20 @@
       state.review.reviewed += Number(res.review?.reviewed) || batch.length;
       applyCorrections(batch, res);
       state.reviewAttempts = 0;
+      logEvent(
+        res.review?.failed ? 'warn' : 'info',
+        res.review?.failed ? 'review.failed' : 'review.end',
+        res.review?.failed ? '审校失败，保留主译文' : undefined,
+        {
+          reviewed: Number(res.review?.reviewed) || batch.length,
+          corrected: Number(res.review?.corrected) || 0,
+          rejected: Array.isArray(res.rejected) ? res.rejected.length : 0,
+          truncated: Boolean(res.review?.truncated),
+        },
+      );
     } catch (err) {
       if (generation !== state.generation) return;
+      logEvent('warn', 'review.failed', errorText(err), { attempt: state.reviewAttempts + 1 });
       if (state.reviewAttempts < 1) {
         // 只退避重试一次；仍失败就保留主译文结束本次审校
         state.reviewAttempts += 1;
@@ -1192,6 +1250,15 @@
             ...(index + 1 < texts.length ? { next: texts[index + 1] } : {}),
           };
         });
+      } catch (err) {
+        logEvent(
+          'warn',
+          'batch.fail',
+          errorText(err),
+          { items: batch.length, chars: texts.reduce((sum, text) => sum + text.length, 0) },
+          { source: texts[0] },
+        );
+        throw err;
       } finally {
         state.progress.done = Math.min(
           state.progress.total,
@@ -1205,6 +1272,7 @@
     let stillFailed = first.failed;
     if (!first.stopped && stillFailed.length > 0) {
       // 第二趟补跑：高并发下的 429 往往是瞬时的，冷却后能补回来
+      logEvent('info', 'batch.retry', undefined, { batches: stillFailed.length });
       const retry = await runPool(
         stillFailed.map((index) => batches[index]),
         worker,
@@ -1297,6 +1365,15 @@
             ...(next ? { next } : {}),
           };
         });
+      } catch (err) {
+        logEvent(
+          'warn',
+          'batch.fail',
+          errorText(err),
+          { items: job.items.length, chars: job.items.reduce((sum, item) => sum + item.text.length, 0) },
+          { source: job.items[0]?.text },
+        );
+        throw err;
       } finally {
         state.progress.done = Math.min(
           state.progress.total,
@@ -1308,6 +1385,7 @@
     const first = await runPool(jobs, worker, policy.concurrency);
     let stillFailed = first.failed;
     if (!first.stopped && stillFailed.length > 0) {
+      logEvent('info', 'batch.retry', undefined, { batches: stillFailed.length });
       const retry = await runPool(
         stillFailed.map((index) => jobs[index]),
         worker,
@@ -1468,6 +1546,10 @@
       state.pending = false;
       return null;
     }
+    logEvent('info', 'scroll.scan', undefined, {
+      pending:
+        state.mode === 'bilingual' ? state.pendingBlocks.length : state.pendingNodes.length,
+    });
 
     // 请求失败（含第 0 批中止）时这些可见候选还没被标记，必须放回 pending，
     // 否则它们既不在 pending 也不在 seen，会永远漏翻。
@@ -1510,8 +1592,9 @@
         );
       }
       return outcome;
-    } catch {
+    } catch (err) {
       // 补翻失败不打扰用户：失败项放回 pending，下次滚动会再试
+      logEvent('error', 'error', errorText(err), { where: 'scanVisible' });
       for (const block of retryBlocks) {
         if (state.seenBlocks.has(block.el) || state.queuedBlocks.has(block.el)) continue;
         state.queuedBlocks.add(block.el);
@@ -1629,13 +1712,25 @@
       state.scope = page.scope;
       state.target = page.target;
       state.targetCode = page.targetCode;
+      state.debugSamples = page.samples;
+      logEvent('info', 'page.translate.start', undefined, {
+        url: pageContext().url,
+        scope: state.scope,
+      });
 
       const result =
         state.scope === 'whole' ? await translateWhole() : await translateViewportFirst();
       if (result.ok && state.scope === 'viewport') installObservers();
+      logEvent(result.ok ? 'info' : 'warn', 'page.translate.end', undefined, {
+        translated: Number(/** @type {any} */ (result).translated) || 0,
+        failed: Number(/** @type {any} */ (result).failed) || 0,
+        stopped: Boolean(/** @type {any} */ (result).stopped),
+        pending: state.pending,
+      });
       return result;
     } catch (err) {
       showToast(`翻译失败：${errorText(err)}`, { error: true, timeout: 5000 });
+      logEvent('error', 'error', errorText(err), { where: 'translatePage' });
       return { ok: false, error: errorText(err) };
     } finally {
       state.busy = false;
