@@ -1,6 +1,7 @@
 {
   "name": "sopen-translate",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "check": "tsc -p .",

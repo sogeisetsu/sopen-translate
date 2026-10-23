@@ -211,3 +211,7 @@ popup 与设置页共用 `extension/lib/languages.js` 的 10 项列表：简体�
 ## 状态
 
 `0.2.0`。自动化检查（类型、两套冒烟、词库一致性）通过；阶段 E/F 的真机与 G 的 spike 记录见 `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md`。
+
+## 许可
+
+本项目采用 [Apache License 2.0](LICENSE)，版权声明见 [NOTICE](NOTICE)。第三方数据来源与许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
