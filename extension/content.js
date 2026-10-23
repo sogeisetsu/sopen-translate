@@ -57,6 +57,14 @@
   const VIEWPORT_MARGIN = 500;
   const SCROLL_THROTTLE_MS = 200;
   const MUTATION_DEBOUNCE_MS = 500;
+  /**
+   * 视口首屏 / 续翻按“尽快出第一批”切，而不是按整页吞吐切：
+   * 8000 字符 / 400 段会变成单个大请求，首屏要等整批返回；
+   * 拆成多个小批后用同一并发数并行，第一批明显更快。
+   * 整页模式仍用 provider 策略。
+   */
+  const VIEWPORT_BATCH_CHARS = 2000;
+  const VIEWPORT_BATCH_ITEMS = 60;
 
   /** @typedef {{ chars: number, items: number, concurrency: number }} Policy */
   /** @typedef {{ el: Element, text: string }} Block */
@@ -160,6 +168,19 @@
     }
     state.policy = policy;
     return policy;
+  }
+
+  /**
+   * 视口 pass 用更小的批次，让第一批译文尽快出现；并发数保持不变。
+   * @param {Policy} policy
+   * @returns {Policy}
+   */
+  function viewportPolicy(policy) {
+    return {
+      chars: Math.min(policy.chars, VIEWPORT_BATCH_CHARS),
+      items: Math.min(policy.items, VIEWPORT_BATCH_ITEMS),
+      concurrency: policy.concurrency,
+    };
   }
 
   /**
@@ -784,16 +805,16 @@
 
   /**
    * @param {Text[]} nodes
-   * @param {{ scrolling?: boolean }} [options]
+   * @param {{ scrolling?: boolean, policy?: Policy }} [options]
    * @returns {Promise<{ translated: number, failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean, truncated: boolean }, remaining: Text[] }>}
    */
-  async function runTextPass(nodes, { scrolling = false } = {}) {
+  async function runTextPass(nodes, { scrolling = false, policy: policyOverride } = {}) {
     if (nodes.length === 0) {
       return { translated: 0, failed: 0, protected: 0, warnings: 0, stopped: false, remaining: [] };
     }
 
     state.progress.total += nodes.length;
-    const policy = await readPolicy();
+    const policy = policyOverride || (await readPolicy());
     const batches = batchNodes(nodes, policy);
     let translated = 0;
     let protectedCount = 0;
@@ -865,17 +886,17 @@
 
   /**
    * @param {Block[]} blocks
-   * @param {{ scrolling?: boolean }} [options]
+   * @param {{ scrolling?: boolean, policy?: Policy }} [options]
    * @returns {Promise<{ translated: number, failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean, truncated: boolean }, remaining: Block[] }>}
    */
-  async function runBlockPass(blocks, { scrolling = false } = {}) {
+  async function runBlockPass(blocks, { scrolling = false, policy: policyOverride } = {}) {
     if (blocks.length === 0) {
       return { translated: 0, failed: 0, protected: 0, warnings: 0, stopped: false, remaining: [] };
     }
 
     const segments = buildSegments(blocks);
     state.progress.total += segments.length;
-    const policy = await readPolicy();
+    const policy = policyOverride || (await readPolicy());
     const batches = batchSegments(segments, policy);
     /** @type {{ items: { text: string }[], offset: number }[]} */
     const jobs = [];
@@ -1091,11 +1112,12 @@
 
     state.busy = true;
     try {
+      const policy = viewportPolicy(await readPolicy());
       if (state.mode === 'bilingual') {
         const split = splitBlocksByVisibility(state.pendingBlocks);
         state.pendingBlocks = split.hidden;
         retryBlocks = split.visible;
-        const outcome = await runBlockPass(split.visible, { scrolling: true });
+        const outcome = await runBlockPass(split.visible, { scrolling: true, policy });
         retryBlocks = [];
         state.pendingBlocks.push(...outcome.remaining);
         state.pending = hasVisiblePending();
@@ -1111,7 +1133,7 @@
       const split = splitNodesByVisibility(state.pendingNodes);
       state.pendingNodes = split.hidden;
       retryNodes = split.visible;
-      const outcome = await runTextPass(split.visible, { scrolling: true });
+      const outcome = await runTextPass(split.visible, { scrolling: true, policy });
       retryNodes = [];
       state.pendingNodes.push(...outcome.remaining);
       state.pending = hasVisiblePending();
@@ -1176,6 +1198,7 @@
   }
 
   async function translateViewportFirst() {
+    const policy = viewportPolicy(await readPolicy());
     if (state.mode === 'bilingual') {
       const blocks = collectBlocks();
       if (blocks.length === 0) {
@@ -1186,7 +1209,7 @@
       state.pendingBlocks = split.hidden;
       for (const block of split.hidden) state.queuedBlocks.add(block.el);
 
-      const outcome = await runBlockPass(split.visible);
+      const outcome = await runBlockPass(split.visible, { policy });
       for (const block of outcome.remaining) {
         if (!state.queuedBlocks.has(block.el)) {
           state.queuedBlocks.add(block.el);
@@ -1210,7 +1233,7 @@
     state.pendingNodes = split.hidden;
     for (const node of split.hidden) state.queuedNodes.add(node);
 
-    const outcome = await runTextPass(split.visible);
+    const outcome = await runTextPass(split.visible, { policy });
     for (const node of outcome.remaining) {
       if (!state.queuedNodes.has(node)) {
         state.queuedNodes.add(node);
