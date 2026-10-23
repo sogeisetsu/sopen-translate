@@ -6,6 +6,10 @@
  * - `bilingual`（双语）：按块元素收集文本，译文追加到块内末尾的 `span` 里，
  *   不新增兄弟 `div`（表格 / 列表结构不会被破坏）。
  *
+ * 两种范围：
+ * - `viewport`（默认）：先翻当前视口 + 500px 余量，滚动 / 尺寸变化 / SPA 重渲染时继续补翻；
+ * - `whole`：一次性整页翻译，保持旧行为。
+ *
  * 不变量：每一轮翻译都从「原文」出发——开始前先把上一轮的改动还原掉。
  * 否则 originals 里会混进译文，还原时就回不到原文了。
  */
@@ -49,15 +53,59 @@
   const RETRY_CONCURRENCY = 2;
   const LEAF_CONTAINER_MIN_CHARS = 40;
 
+  /** 视口判定的上下余量：比一屏多一点，滚动时几乎不用等 */
+  const VIEWPORT_MARGIN = 500;
+  const SCROLL_THROTTLE_MS = 200;
+  const MUTATION_DEBOUNCE_MS = 500;
+  /**
+   * 视口首屏 / 续翻按“尽快出第一批”切，而不是按整页吞吐切：
+   * 8000 字符 / 400 段会变成单个大请求，首屏要等整批返回；
+   * 拆成多个小批后用同一并发数并行，第一批明显更快。
+   * 整页模式仍用 provider 策略。
+   */
+  const VIEWPORT_BATCH_CHARS = 2000;
+  const VIEWPORT_BATCH_ITEMS = 60;
+
+  /** @typedef {{ chars: number, items: number, concurrency: number }} Policy */
+  /** @typedef {{ el: Element, text: string }} Block */
+
   const state = {
     /** @type {'translation' | 'bilingual'} */
     mode: 'translation',
+    /** @type {'viewport' | 'whole'} */
+    scope: 'viewport',
     /** @type {{ node: Text, text: string }[]} 纯译文用 */
     originals: [],
     /** @type {Element[]} 双语用 */
     injected: [],
     busy: false,
     progress: { done: 0, total: 0 },
+    /** 已经成功处理过的节点 / 块：滚动补翻时不再送一遍 */
+    /** @type {WeakSet<Text>} */
+    seenNodes: new WeakSet(),
+    /** @type {WeakSet<Element>} */
+    seenBlocks: new WeakSet(),
+    /** 视口外、等待滚动的候选 */
+    /** @type {Text[]} */
+    pendingNodes: [],
+    /** @type {Block[]} */
+    pendingBlocks: [],
+    /** 已进入 pending 的成员，避免 MutationObserver 重复入队 */
+    /** @type {WeakSet<Text>} */
+    queuedNodes: new WeakSet(),
+    /** @type {WeakSet<Element>} */
+    queuedBlocks: new WeakSet(),
+    /** 是否还有可见但未处理的候选（page.status 用） */
+    pending: false,
+    /** 标签页隐藏时暂停补翻 */
+    paused: false,
+    /** 当前有任务在跑时，滚动的补扫请求合并到这一轮之后 */
+    pendingScan: false,
+    scanTimer: 0,
+    /** @type {(() => void)[]} */
+    cleanups: [],
+    /** @type {Policy | null} */
+    policy: null,
   };
 
   /** @type {HTMLDivElement | null} */
@@ -71,7 +119,7 @@
 
   /**
    * @param {string[]} texts
-   * @returns {Promise<{ translations: string[], protected: number, warnings: { index: number, missing: string[] }[] }>}
+   * @returns {Promise<{ translations: string[], protected: number, warnings: { index: number, missing: string[] }[], review?: { reviewed: number, corrected: number, failed: boolean, truncated: boolean } }>}
    */
   async function requestTranslate(texts) {
     const res = await chrome.runtime.sendMessage({ type: 'translate', texts });
@@ -85,6 +133,7 @@
       translations,
       protected: Number(res.protected) || 0,
       warnings: Array.isArray(res.warnings) ? res.warnings : [],
+      review: res.review,
     };
   }
 
@@ -94,19 +143,44 @@
    * 端点限流特性不同，批大小与并发不能一刀切：
    * - DeepL 单请求最多 50 条 text，但吞吐高，可以 4 路；
    * - OpenCode Go 限的是持续速率，少而大的批次更稳（实测 50 段 × 4 路会熔断）；
-   * - 商汤 RPM 很低，1 路。
-   * @returns {Promise<{ chars: number, items: number, concurrency: number }>}
+   * - 商汤 RPM 很低，1 路；
+   * - 微软 MT 单请求有字符/条数上限，保守取 5,000 字符 / 100 段 / 4 路。
+   * @returns {Promise<Policy>}
    */
   async function readPolicy() {
+    if (state.policy) return state.policy;
+    /** @type {Policy} */
+    let policy;
     try {
       const status = await chrome.runtime.sendMessage({ type: 'status' });
       const active = status?.active;
-      if (active?.protocol === 'deepl') return { chars: 3000, items: 50, concurrency: 4 };
-      if (active?.presetId === 'sensenova') return { chars: 6000, items: 300, concurrency: 1 };
-      return { chars: 8000, items: 400, concurrency: 8 };
+      if (active?.protocol === 'deepl') {
+        policy = { chars: 3000, items: 50, concurrency: 4 };
+      } else if (active?.protocol === 'microsoft-edge' || active?.protocol === 'microsoft-azure') {
+        policy = { chars: 5000, items: 100, concurrency: 4 };
+      } else if (active?.presetId === 'sensenova') {
+        policy = { chars: 6000, items: 300, concurrency: 1 };
+      } else {
+        policy = { chars: 8000, items: 400, concurrency: 8 };
+      }
     } catch {
-      return { chars: BATCH_CHARS, items: BATCH_ITEMS, concurrency: 4 };
+      policy = { chars: BATCH_CHARS, items: BATCH_ITEMS, concurrency: 4 };
     }
+    state.policy = policy;
+    return policy;
+  }
+
+  /**
+   * 视口 pass 用更小的批次，让第一批译文尽快出现；并发数保持不变。
+   * @param {Policy} policy
+   * @returns {Policy}
+   */
+  function viewportPolicy(policy) {
+    return {
+      chars: Math.min(policy.chars, VIEWPORT_BATCH_CHARS),
+      items: Math.min(policy.items, VIEWPORT_BATCH_ITEMS),
+      concurrency: policy.concurrency,
+    };
   }
 
   /**
@@ -330,7 +404,7 @@
 
   /**
    * @param {Element} [root]
-   * @returns {{ el: Element, text: string }[]}
+   * @returns {Block[]}
    */
   function collectBlocks(root = document.body) {
     if (!root) return [];
@@ -350,7 +424,7 @@
     visit(root);
 
     const candidateSet = new Set(candidates);
-    /** @type {{ el: Element, text: string }[]} */
+    /** @type {Block[]} */
     const blocks = [];
 
     for (const el of candidates) {
@@ -441,7 +515,7 @@
   }
 
   /**
-   * @param {{ el: Element, text: string }[]} blocks
+   * @param {Block[]} blocks
    * @returns {{ text: string, blockIndex: number, chunkIndex: number }[]}
    */
   function buildSegments(blocks) {
@@ -483,9 +557,78 @@
     return batches;
   }
 
+  /* ------------------------------ 视口判定 ------------------------------ */
+
+  /**
+   * 元素是否与视口（含上下余量）相交。
+   * rect 全 0 视为未布局 / 隐藏；没有布局能力的测试环境按可见处理。
+   * @param {Element} el
+   * @param {number} [margin]
+   * @returns {boolean}
+   */
+  function inViewport(el, margin = VIEWPORT_MARGIN) {
+    const rect = typeof el?.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+    if (!rect) return true;
+    const allZero =
+      !rect.top && !rect.bottom && !rect.left && !rect.right && !rect.width && !rect.height;
+    if (allZero) return false;
+
+    const height = win.innerHeight || document.documentElement?.clientHeight || 0;
+    if (!height) return true;
+    const width = win.innerWidth || document.documentElement?.clientWidth || 0;
+
+    if (rect.bottom < -margin || rect.top > height + margin) return false;
+    if (width > 0 && (rect.right < -margin || rect.left > width + margin)) return false;
+    return true;
+  }
+
+  /**
+   * 纯译文按父元素判定：同一父元素的多个文本节点共享一次 rect。
+   * @param {Text[]} nodes
+   * @returns {{ visible: Text[], hidden: Text[] }}
+   */
+  function splitNodesByVisibility(nodes) {
+    /** @type {Map<Element, boolean>} */
+    const cache = new Map();
+    /** @type {Text[]} */
+    const visible = [];
+    /** @type {Text[]} */
+    const hidden = [];
+
+    for (const node of nodes) {
+      if (node.isConnected === false) continue;
+      const parent = node.parentElement;
+      if (!parent) continue;
+      let ok = cache.get(parent);
+      if (ok === undefined) {
+        ok = inViewport(parent);
+        cache.set(parent, ok);
+      }
+      (ok ? visible : hidden).push(node);
+    }
+    return { visible, hidden };
+  }
+
+  /**
+   * @param {Block[]} blocks
+   * @returns {{ visible: Block[], hidden: Block[] }}
+   */
+  function splitBlocksByVisibility(blocks) {
+    /** @type {Block[]} */
+    const visible = [];
+    /** @type {Block[]} */
+    const hidden = [];
+    for (const block of blocks) {
+      if (block.el.isConnected === false) continue;
+      (inViewport(block.el) ? visible : hidden).push(block);
+    }
+    return { visible, hidden };
+  }
+
   /* ------------------------------- 写回 / 插入 ------------------------------- */
 
   /**
+   * 成功拿到译文的节点都记入 seen：术语回退成原文也不会在滚动时反复重发。
    * @param {Text[]} nodes
    * @param {string[]} translations
    * @returns {number}
@@ -496,6 +639,7 @@
       const next = translations[position];
       const from = node.nodeValue || '';
       if (typeof next !== 'string' || !next.trim()) return;
+      state.seenNodes.add(node);
       if (next.trim() === from.trim()) return;
       node.nodeValue = from.replace(from.trim(), next.trim());
       state.originals.push({ node, text: from });
@@ -506,10 +650,10 @@
 
   /**
    * 译文追加到块内末尾（`append`，不是兄弟 `div`），表格 / 列表结构安全。
-   * @param {{ el: Element, text: string }[]} blocks
+   * @param {Block[]} blocks
    * @param {{ blockIndex: number, chunkIndex: number }[]} segments
    * @param {string[]} translations
-   * @returns {number} 插入的块数
+   * @returns {{ inserted: number, remaining: Block[] }}
    */
   function applyBlockTranslations(blocks, segments, translations) {
     /** @type {Map<number, string[]>} */
@@ -521,11 +665,20 @@
     });
 
     let inserted = 0;
+    /** @type {Block[]} */
+    const remaining = [];
+
     blocks.forEach((block, blockIndex) => {
       const parts = byBlock.get(blockIndex);
       if (!parts || parts.length === 0) return;
-      // 有 chunk 没翻出来就整块跳过，不要把半截译文拼上去
-      if (parts.some((part) => typeof part !== 'string' || !part.trim())) return;
+      // 有 chunk 没翻出来就整块跳过，不要把半截译文拼上去；留到下次滚动重试
+      if (parts.some((part) => typeof part !== 'string' || !part.trim())) {
+        if (block.el.isConnected !== false) remaining.push(block);
+        return;
+      }
+
+      // 请求成功：即使译文等于原文（术语回退）也算处理过，避免无限重试
+      state.seenBlocks.add(block.el);
 
       const text = joinChunks(parts).trim();
       if (!text) return;
@@ -544,12 +697,27 @@
       state.injected.push(span);
       inserted += 1;
     });
-    return inserted;
+    return { inserted, remaining };
   }
 
-  /* ------------------------------- 还原 ------------------------------- */
+  /* ------------------------------- 还原 / 观察器 ------------------------------- */
+
+  function disconnectObservers() {
+    for (const cleanup of state.cleanups) {
+      try {
+        cleanup();
+      } catch {
+        /* 宿主页面卸载时忽略 */
+      }
+    }
+    state.cleanups = [];
+  }
 
   function resetPage() {
+    disconnectObservers();
+    clearTimeout(state.scanTimer);
+    state.scanTimer = 0;
+
     for (const el of state.injected) {
       if (typeof el.remove === 'function') el.remove();
       else el.parentElement?.removeChild?.(el);
@@ -557,6 +725,17 @@
     state.injected = [];
     for (const { node, text } of state.originals) node.nodeValue = text;
     state.originals = [];
+
+    state.seenNodes = new WeakSet();
+    state.seenBlocks = new WeakSet();
+    state.queuedNodes = new WeakSet();
+    state.queuedBlocks = new WeakSet();
+    state.pendingNodes = [];
+    state.pendingBlocks = [];
+    state.pending = false;
+    state.paused = false;
+    state.pendingScan = false;
+    state.policy = null;
     state.progress = { done: 0, total: 0 };
   }
 
@@ -568,115 +747,156 @@
     return { ok: true, restored: count };
   }
 
-  /* ------------------------------- 展示模式 ------------------------------- */
+  /* ------------------------------- 设置 ------------------------------- */
 
-  /** @returns {Promise<'translation' | 'bilingual'>} */
-  async function readDisplayMode() {
+  /**
+   * 模式与范围同一次读取，避免两套逻辑读到不同代的设置。
+   * @returns {Promise<{ mode: 'translation' | 'bilingual', scope: 'viewport' | 'whole' }>}
+   */
+  async function readPageSettings() {
     try {
-      const data = /** @type {{ settings?: { displayMode?: string } }} */ (
+      const data = /** @type {{ settings?: { displayMode?: string, translateScope?: string } }} */ (
         await chrome.storage.local.get('settings')
       );
-      return data.settings?.displayMode === 'bilingual' ? 'bilingual' : 'translation';
+      const settings = data.settings || {};
+      return {
+        mode: settings.displayMode === 'bilingual' ? 'bilingual' : 'translation',
+        scope: settings.translateScope === 'whole' ? 'whole' : 'viewport',
+      };
     } catch {
-      return 'translation';
+      return { mode: 'translation', scope: 'viewport' };
     }
   }
 
-  function progressText() {
-    const label = state.mode === 'bilingual' ? '翻译中（双语）' : '翻译中';
+  /* ------------------------------- 进度文案 ------------------------------- */
+
+  /**
+   * @param {boolean} [scrolling]
+   * @returns {string}
+   */
+  function progressText(scrolling = false) {
+    const mode = state.mode === 'bilingual' ? '双语' : '';
+    const scope = scrolling ? (mode ? `${mode}·滚动` : '滚动') : mode;
+    const label = scope ? `翻译中（${scope}）` : '翻译中';
     return `${label} ${state.progress.done}/${state.progress.total}…`;
   }
 
   /**
    * @param {string} prefix
-   * @param {{ failed: number, protected: number, warnings: number, stopped: boolean }} summary
+   * @param {{ failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean } }} summary
    */
-  function summaryText(prefix, { failed, protected: protectedCount, warnings, stopped }) {
+  function summaryText(prefix, { failed, protected: protectedCount, warnings, stopped, review }) {
     const parts = [prefix];
     if (failed > 0) parts.push(`${failed} 段失败`);
     if (protectedCount > 0) parts.push(`${protectedCount} 段保留原文`);
     if (warnings > 0) parts.push(`${warnings} 段可能未保留术语`);
+    if (review && review.reviewed > 0) {
+      parts.push(
+        review.failed
+          ? `审校失败，保留原译文`
+          : `已审校 ${review.reviewed} 段，修正 ${review.corrected} 段`,
+      );
+    }
     if (stopped) parts.push('连续失败，已停止');
     return parts.join('，');
   }
 
   /* ------------------------------- 纯译文 ------------------------------- */
 
-  async function translateTextMode() {
-    const nodes = collectTextNodes();
+  /**
+   * @param {Text[]} nodes
+   * @param {{ scrolling?: boolean, policy?: Policy }} [options]
+   * @returns {Promise<{ translated: number, failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean, truncated: boolean }, remaining: Text[] }>}
+   */
+  async function runTextPass(nodes, { scrolling = false, policy: policyOverride } = {}) {
     if (nodes.length === 0) {
-      showToast('这一页没找到可翻译的文本', { timeout: 2500 });
-      return { ok: false, error: '没有可翻译的文本' };
+      return { translated: 0, failed: 0, protected: 0, warnings: 0, stopped: false, remaining: [] };
     }
 
-    state.progress = { done: 0, total: nodes.length };
-    const policy = await readPolicy();
+    state.progress.total += nodes.length;
+    const policy = policyOverride || (await readPolicy());
     const batches = batchNodes(nodes, policy);
     let translated = 0;
     let protectedCount = 0;
     let warnings = 0;
+    let reviewed = 0;
+    let corrected = 0;
+    let reviewFailed = false;
+    let reviewTruncated = false;
 
-    try {
-      /** @param {Text[]} batch */
-      const worker = async (batch) => {
-        showToast(progressText());
-        try {
-          const result = await requestTranslate(
-            batch.map((node) => (node.nodeValue || '').trim()),
-          );
-          protectedCount += result.protected;
-          warnings += result.warnings.length;
-          translated += applyTextTranslations(batch, result.translations);
-        } finally {
-          state.progress.done = Math.min(
-            state.progress.total,
-            state.progress.done + batch.length,
-          );
+    /** @param {Text[]} batch */
+    const worker = async (batch) => {
+      showToast(progressText(scrolling));
+      try {
+        const result = await requestTranslate(batch.map((node) => (node.nodeValue || '').trim()));
+        protectedCount += result.protected;
+        warnings += result.warnings.length;
+        if (result.review) {
+          reviewed += result.review.reviewed;
+          corrected += result.review.corrected;
+          reviewFailed = reviewFailed || result.review.failed;
+          reviewTruncated = reviewTruncated || result.review.truncated;
         }
-      };
-
-      const first = await runPool(batches, worker, policy.concurrency);
-      let stillFailed = first.failed;
-      if (!first.stopped && stillFailed.length > 0) {
-        // 第二趟串行补跑：高并发下的 429 往往是瞬时的，冷却后能补回来
-        const retry = await runPool(
-          stillFailed.map((index) => batches[index]),
-          worker,
-          RETRY_CONCURRENCY,
-          { abortOnFirst: false },
+        translated += applyTextTranslations(batch, result.translations);
+      } finally {
+        state.progress.done = Math.min(
+          state.progress.total,
+          state.progress.done + batch.length,
         );
-        stillFailed = [...retry.failed, ...retry.unrun].map((index) => stillFailed[index]);
       }
-      const failed = stillFailed.reduce((sum, index) => sum + batches[index].length, 0);
+    };
 
-      showToast(
-        summaryText(`已翻译 ${translated} 段`, {
-          failed,
-          protected: protectedCount,
-          warnings,
-          stopped: first.stopped,
-        }),
-        { timeout: 3000 },
+    // 第 0 批失败会在这里抛错，交给上层中止
+    const first = await runPool(batches, worker, policy.concurrency);
+    let stillFailed = first.failed;
+    if (!first.stopped && stillFailed.length > 0) {
+      // 第二趟补跑：高并发下的 429 往往是瞬时的，冷却后能补回来
+      const retry = await runPool(
+        stillFailed.map((index) => batches[index]),
+        worker,
+        RETRY_CONCURRENCY,
+        { abortOnFirst: false },
       );
-      return { ok: true, translated, failed, protected: protectedCount, stopped: first.stopped };
-    } catch (err) {
-      showToast(`翻译失败：${errorText(err)}`, { error: true, timeout: 5000 });
-      return { ok: false, error: errorText(err) };
+      stillFailed = [...retry.failed, ...retry.unrun].map((index) => stillFailed[index]);
     }
+
+    const remainingBatches = stillFailed.map((index) => batches[index]);
+    const failed = remainingBatches.reduce((sum, batch) => sum + batch.length, 0);
+    /** @type {Text[]} */
+    const remaining = [];
+    for (const batch of remainingBatches) {
+      for (const node of batch) {
+        if (node.isConnected === false) continue;
+        if (!state.seenNodes.has(node)) remaining.push(node);
+      }
+    }
+
+    return {
+      translated,
+      failed,
+      protected: protectedCount,
+      warnings,
+      stopped: first.stopped,
+      review: reviewed > 0 || reviewFailed ? { reviewed, corrected, failed: reviewFailed, truncated: reviewTruncated } : undefined,
+      remaining,
+    };
   }
 
   /* ------------------------------- 双语 ------------------------------- */
 
-  async function translateBilingual() {
-    const blocks = collectBlocks();
-    const segments = buildSegments(blocks);
-    if (segments.length === 0) {
-      showToast('这一页没找到可翻译的文本', { timeout: 2500 });
-      return { ok: false, error: '没有可翻译的文本' };
+  /**
+   * @param {Block[]} blocks
+   * @param {{ scrolling?: boolean, policy?: Policy }} [options]
+   * @returns {Promise<{ translated: number, failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean, truncated: boolean }, remaining: Block[] }>}
+   */
+  async function runBlockPass(blocks, { scrolling = false, policy: policyOverride } = {}) {
+    if (blocks.length === 0) {
+      return { translated: 0, failed: 0, protected: 0, warnings: 0, stopped: false, remaining: [] };
     }
 
-    state.progress = { done: 0, total: segments.length };
-    const policy = await readPolicy();
+    const segments = buildSegments(blocks);
+    state.progress.total += segments.length;
+    const policy = policyOverride || (await readPolicy());
     const batches = batchSegments(segments, policy);
     /** @type {{ items: { text: string }[], offset: number }[]} */
     const jobs = [];
@@ -689,72 +909,371 @@
     const translations = new Array(segments.length).fill('');
     let protectedCount = 0;
     let warnings = 0;
+    let reviewed = 0;
+    let corrected = 0;
+    let reviewFailed = false;
+    let reviewTruncated = false;
 
+    /** @param {{ items: { text: string }[], offset: number }} job */
+    const worker = async (job) => {
+      showToast(progressText(scrolling));
+      try {
+        const result = await requestTranslate(job.items.map((segment) => segment.text));
+        result.translations.forEach((text, position) => {
+          translations[job.offset + position] = text;
+        });
+        protectedCount += result.protected;
+        warnings += result.warnings.length;
+        if (result.review) {
+          reviewed += result.review.reviewed;
+          corrected += result.review.corrected;
+          reviewFailed = reviewFailed || result.review.failed;
+          reviewTruncated = reviewTruncated || result.review.truncated;
+        }
+      } finally {
+        state.progress.done = Math.min(
+          state.progress.total,
+          state.progress.done + job.items.length,
+        );
+      }
+    };
+
+    const first = await runPool(jobs, worker, policy.concurrency);
+    let stillFailed = first.failed;
+    if (!first.stopped && stillFailed.length > 0) {
+      const retry = await runPool(
+        stillFailed.map((index) => jobs[index]),
+        worker,
+        RETRY_CONCURRENCY,
+        { abortOnFirst: false },
+      );
+      stillFailed = [...retry.failed, ...retry.unrun].map((index) => stillFailed[index]);
+    }
+    const failed = stillFailed.reduce((sum, index) => sum + jobs[index].items.length, 0);
+
+    const applied = applyBlockTranslations(blocks, segments, translations);
+    return {
+      translated: applied.inserted,
+      failed,
+      protected: protectedCount,
+      warnings,
+      stopped: first.stopped,
+      review: reviewed > 0 || reviewFailed ? { reviewed, corrected, failed: reviewFailed, truncated: reviewTruncated } : undefined,
+      remaining: applied.remaining,
+    };
+  }
+
+  /* ------------------------------- 补翻调度 ------------------------------- */
+
+  /**
+   * @param {() => void} fn
+   * @param {number} wait
+   * @returns {() => void}
+   */
+  function throttle(fn, wait) {
+    let last = 0;
+    let timer = 0;
+    return () => {
+      const now = Date.now();
+      const remaining = wait - (now - last);
+      if (remaining <= 0) {
+        last = now;
+        fn();
+        return;
+      }
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = 0;
+        last = Date.now();
+        fn();
+      }, remaining);
+    };
+  }
+
+  /** 把 MutationObserver 看到的新内容补进 pending（去重） */
+  function enqueueNewCandidates() {
+    if (state.mode === 'bilingual') {
+      for (const block of collectBlocks()) {
+        if (state.seenBlocks.has(block.el) || state.queuedBlocks.has(block.el)) continue;
+        state.queuedBlocks.add(block.el);
+        state.pendingBlocks.push(block);
+      }
+      return;
+    }
+
+    for (const node of collectTextNodes()) {
+      if (state.seenNodes.has(node) || state.queuedNodes.has(node)) continue;
+      state.queuedNodes.add(node);
+      state.pendingNodes.push(node);
+    }
+  }
+
+  /** 自己插入的译文块 / 浮层不算“页面变了”，否则每次写入都会触发一次重扫 */
+  function isOwnNode(node) {
+    if (!node) return true;
+    if (node.nodeType === 1) {
+      const el = /** @type {Element} */ (node);
+      if (el.id === 'sopen-translate-ui') return true;
+      if (el.classList?.contains?.('sopen-translated-block')) return true;
+      if (el.hasAttribute?.('data-sopen-translated')) return true;
+      return false;
+    }
+    if (node.nodeType === 3) {
+      const parent = /** @type {Text} */ (node).parentElement;
+      return Boolean(parent?.closest?.('.sopen-translated-block'));
+    }
+    return false;
+  }
+
+  function installObservers() {
+    if (state.scope !== 'viewport' || state.cleanups.length > 0) return;
+
+    const onScroll = throttle(() => scheduleScan(), SCROLL_THROTTLE_MS);
+    win.addEventListener('scroll', onScroll, { passive: true });
+    win.addEventListener('resize', onScroll, { passive: true });
+    state.cleanups.push(() => {
+      win.removeEventListener('scroll', onScroll);
+      win.removeEventListener('resize', onScroll);
+    });
+
+    if (typeof document.addEventListener === 'function') {
+      const onVisibility = () => {
+        state.paused = document.hidden === true;
+        if (state.paused) return;
+        // 回到前台补扫一次：隐藏期间可能已经滚到新位置
+        enqueueNewCandidates();
+        scheduleScan();
+      };
+      document.addEventListener('visibilitychange', onVisibility);
+      state.cleanups.push(() => document.removeEventListener('visibilitychange', onVisibility));
+    }
+
+    if (typeof MutationObserver === 'function' && document.body) {
+      let timer = 0;
+      const observer = new MutationObserver((records) => {
+        const meaningful = records.some(
+          (record) =>
+            record.removedNodes.length > 0 ||
+            Array.from(record.addedNodes || []).some((node) => !isOwnNode(node)),
+        );
+        if (!meaningful) return;
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          timer = 0;
+          enqueueNewCandidates();
+          scheduleScan();
+        }, MUTATION_DEBOUNCE_MS);
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      state.cleanups.push(() => {
+        clearTimeout(timer);
+        observer.disconnect();
+      });
+    }
+  }
+
+  /** 是否还有“现在就看得见”的未处理候选 */
+  function hasVisiblePending() {
+    if (state.scope !== 'viewport') return false;
+    if (state.mode === 'bilingual') {
+      return splitBlocksByVisibility(state.pendingBlocks).visible.length > 0;
+    }
+    return splitNodesByVisibility(state.pendingNodes).visible.length > 0;
+  }
+
+  /** 当前没有任务在跑时才排期；任务中来的滚动请求合并到这一轮之后 */
+  function scheduleScan() {
+    if (state.scope !== 'viewport' || state.paused) return;
+    if (state.busy) {
+      state.pendingScan = true;
+      return;
+    }
+    if (state.scanTimer) return;
+    state.scanTimer = setTimeout(() => {
+      state.scanTimer = 0;
+      void scanVisible();
+    }, 0);
+  }
+
+  /** 只翻“现在可见”的 pending，剩下的留到下次滚动 */
+  async function scanVisible() {
+    if (state.busy || state.scope !== 'viewport' || state.paused) return null;
+    if (state.mode === 'bilingual' ? state.pendingBlocks.length === 0 : state.pendingNodes.length === 0) {
+      state.pending = false;
+      return null;
+    }
+
+    // 请求失败（含第 0 批中止）时这些可见候选还没被标记，必须放回 pending，
+    // 否则它们既不在 pending 也不在 seen，会永远漏翻。
+    /** @type {Block[]} */
+    let retryBlocks = [];
+    /** @type {Text[]} */
+    let retryNodes = [];
+
+    state.busy = true;
     try {
-      /** @param {{ items: { text: string }[], offset: number }} job */
-      const worker = async (job) => {
-        showToast(progressText());
-        try {
-          const result = await requestTranslate(job.items.map((segment) => segment.text));
-          result.translations.forEach((text, position) => {
-            translations[job.offset + position] = text;
-          });
-          protectedCount += result.protected;
-          warnings += result.warnings.length;
-        } finally {
-          state.progress.done = Math.min(
-            state.progress.total,
-            state.progress.done + job.items.length,
+      const policy = viewportPolicy(await readPolicy());
+      if (state.mode === 'bilingual') {
+        const split = splitBlocksByVisibility(state.pendingBlocks);
+        state.pendingBlocks = split.hidden;
+        retryBlocks = split.visible;
+        const outcome = await runBlockPass(split.visible, { scrolling: true, policy });
+        retryBlocks = [];
+        state.pendingBlocks.push(...outcome.remaining);
+        state.pending = hasVisiblePending();
+        if (outcome.translated > 0) {
+          showToast(
+            summaryText(`已翻译可视区域 ${translatedCount()} 块，滚动继续翻译`, outcome),
+            { timeout: 2500 },
           );
         }
-      };
-
-      const first = await runPool(jobs, worker, policy.concurrency);
-      let stillFailed = first.failed;
-      if (!first.stopped && stillFailed.length > 0) {
-        const retry = await runPool(
-          stillFailed.map((index) => jobs[index]),
-          worker,
-          RETRY_CONCURRENCY,
-          { abortOnFirst: false },
-        );
-        stillFailed = [...retry.failed, ...retry.unrun].map((index) => stillFailed[index]);
+        return outcome;
       }
-      const failed = stillFailed.reduce((sum, index) => sum + jobs[index].items.length, 0);
 
-      const translated = applyBlockTranslations(blocks, segments, translations);
-      showToast(
-        summaryText(`已翻译 ${translated} 块`, {
-          failed,
-          protected: protectedCount,
-          warnings,
-          stopped: first.stopped,
-        }),
-        { timeout: 3000 },
-      );
-      return { ok: true, translated, failed, protected: protectedCount, stopped: first.stopped };
-    } catch (err) {
-      showToast(`翻译失败：${errorText(err)}`, { error: true, timeout: 5000 });
-      return { ok: false, error: errorText(err) };
+      const split = splitNodesByVisibility(state.pendingNodes);
+      state.pendingNodes = split.hidden;
+      retryNodes = split.visible;
+      const outcome = await runTextPass(split.visible, { scrolling: true, policy });
+      retryNodes = [];
+      state.pendingNodes.push(...outcome.remaining);
+      state.pending = hasVisiblePending();
+      if (outcome.translated > 0) {
+        showToast(
+          summaryText(`已翻译可视区域 ${translatedCount()} 段，滚动继续翻译`, outcome),
+          { timeout: 2500 },
+        );
+      }
+      return outcome;
+    } catch {
+      // 补翻失败不打扰用户：失败项放回 pending，下次滚动会再试
+      for (const block of retryBlocks) {
+        if (state.seenBlocks.has(block.el) || state.queuedBlocks.has(block.el)) continue;
+        state.queuedBlocks.add(block.el);
+        state.pendingBlocks.push(block);
+      }
+      for (const node of retryNodes) {
+        if (state.seenNodes.has(node) || state.queuedNodes.has(node)) continue;
+        state.queuedNodes.add(node);
+        state.pendingNodes.push(node);
+      }
+      state.pending = hasVisiblePending();
+      return null;
+    } finally {
+      state.busy = false;
+      if (state.pendingScan) {
+        state.pendingScan = false;
+        scheduleScan();
+      }
     }
   }
 
   /* ------------------------------- 整页翻译 ------------------------------- */
 
+  async function translateWhole() {
+    if (state.mode === 'bilingual') {
+      const blocks = collectBlocks();
+      if (blocks.length === 0) {
+        showToast('这一页没找到可翻译的文本', { timeout: 2500 });
+        return { ok: false, error: '没有可翻译的文本' };
+      }
+      const outcome = await runBlockPass(blocks);
+      showToast(
+        summaryText(`已翻译 ${outcome.translated} 块`, outcome),
+        { timeout: 3000 },
+      );
+      return { ok: true, ...outcome };
+    }
+
+    const nodes = collectTextNodes();
+    if (nodes.length === 0) {
+      showToast('这一页没找到可翻译的文本', { timeout: 2500 });
+      return { ok: false, error: '没有可翻译的文本' };
+    }
+    const outcome = await runTextPass(nodes);
+    showToast(
+      summaryText(`已翻译 ${outcome.translated} 段`, outcome),
+      { timeout: 3000 },
+    );
+    return { ok: true, ...outcome };
+  }
+
+  async function translateViewportFirst() {
+    const policy = viewportPolicy(await readPolicy());
+    if (state.mode === 'bilingual') {
+      const blocks = collectBlocks();
+      if (blocks.length === 0) {
+        showToast('这一页没找到可翻译的文本', { timeout: 2500 });
+        return { ok: false, error: '没有可翻译的文本' };
+      }
+      const split = splitBlocksByVisibility(blocks);
+      state.pendingBlocks = split.hidden;
+      for (const block of split.hidden) state.queuedBlocks.add(block.el);
+
+      const outcome = await runBlockPass(split.visible, { policy });
+      for (const block of outcome.remaining) {
+        if (!state.queuedBlocks.has(block.el)) {
+          state.queuedBlocks.add(block.el);
+          state.pendingBlocks.push(block);
+        }
+      }
+      state.pending = hasVisiblePending();
+      showToast(
+        summaryText(`已翻译可视区域 ${outcome.translated} 块，滚动继续翻译`, outcome),
+        { timeout: 3000 },
+      );
+      return { ok: true, ...outcome };
+    }
+
+    const nodes = collectTextNodes();
+    if (nodes.length === 0) {
+      showToast('这一页没找到可翻译的文本', { timeout: 2500 });
+      return { ok: false, error: '没有可翻译的文本' };
+    }
+    const split = splitNodesByVisibility(nodes);
+    state.pendingNodes = split.hidden;
+    for (const node of split.hidden) state.queuedNodes.add(node);
+
+    const outcome = await runTextPass(split.visible, { policy });
+    for (const node of outcome.remaining) {
+      if (!state.queuedNodes.has(node)) {
+        state.queuedNodes.add(node);
+        state.pendingNodes.push(node);
+      }
+    }
+    state.pending = hasVisiblePending();
+    showToast(
+      summaryText(`已翻译可视区域 ${outcome.translated} 段，滚动继续翻译`, outcome),
+      { timeout: 3000 },
+    );
+    return { ok: true, ...outcome };
+  }
+
   async function translatePage() {
     if (state.busy) return { ok: false, error: '正在翻译中' };
 
-    // 先占住 busy：读模式是异步的，不先占住会让连点两次都通过检查
+    // 先占住 busy：读设置是异步的，不先占住会让连点两次都通过检查
     state.busy = true;
     try {
       // 每轮都从原文出发：上一轮没还原就先还原，避免译文被二次翻译
       resetPage();
-      state.mode = await readDisplayMode();
-      return state.mode === 'bilingual'
-        ? await translateBilingual()
-        : await translateTextMode();
+      const page = await readPageSettings();
+      state.mode = page.mode;
+      state.scope = page.scope;
+
+      const result =
+        state.scope === 'whole' ? await translateWhole() : await translateViewportFirst();
+      if (result.ok && state.scope === 'viewport') installObservers();
+      return result;
+    } catch (err) {
+      showToast(`翻译失败：${errorText(err)}`, { error: true, timeout: 5000 });
+      return { ok: false, error: errorText(err) };
     } finally {
       state.busy = false;
+      // 首屏期间若有滚动请求，任务结束后补扫
+      if (state.pendingScan) {
+        state.pendingScan = false;
+        scheduleScan();
+      }
     }
   }
 
@@ -780,6 +1299,8 @@
           translated: translatedCount(),
           busy: state.busy,
           mode: state.mode,
+          scope: state.scope,
+          pending: state.pending,
           progress: state.progress,
         });
         return false;

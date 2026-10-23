@@ -30,8 +30,10 @@ export const DEFAULT_SETTINGS = {
   /** provider 实例列表 */
   providers: [],
   displayMode: 'translation',
+  translateScope: 'viewport',
   enforcement: 'repair',
   glossary: DEFAULT_GLOSSARY,
+  reviewProviderId: null,
   sessionId: '',
 };
 
@@ -82,11 +84,16 @@ export function normalizeSettings(stored) {
     targetLang: String(raw.targetLang ?? DEFAULT_SETTINGS.targetLang),
     targetLangCode: String(raw.targetLangCode ?? DEFAULT_SETTINGS.targetLangCode),
     displayMode: raw.displayMode === 'bilingual' ? 'bilingual' : 'translation',
+    translateScope: raw.translateScope === 'whole' ? 'whole' : 'viewport',
     enforcement: /** @type {EnforcementMode} */ (
       ['fallback', 'repair', 'warn'].includes(raw.enforcement)
         ? raw.enforcement
         : DEFAULT_SETTINGS.enforcement
     ),
+    reviewProviderId:
+      typeof raw.reviewProviderId === 'string' && raw.reviewProviderId
+        ? raw.reviewProviderId
+        : null,
     glossary,
     sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : '',
     providers,
