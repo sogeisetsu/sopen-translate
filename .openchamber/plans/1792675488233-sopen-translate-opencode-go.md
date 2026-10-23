@@ -1626,6 +1626,7 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 | Wikipedia + OpenCode Go 纯译文 | 265s（单个 8k 请求）→ **14.0s**（2000/60 批次） | 217 | B6 142s | 约整页 10%，达成 ≤1/3 |
 
 - 还原：Wikipedia 77649→77649、opencode.ai 2650→2650、linux.org 1500→1500；GitHub 因 SPA 重渲染 3138→3221（+83，与 B6 的 +95 同量级）。还原后 `.sopen-translated-block` 均为 0。
+- **滚到底覆盖率**（Wikipedia + Edge MT）：viewport 滚到页底后 `translated 3017`、进度 `3796/3796`；同页 whole 模式 `translated 3311`、`4128/4128`。节点覆盖约 91%，但可见文本长度 34004 vs whole 33878 基本一致；剩余候选主要是隐藏 / 折叠元素（whole 模式会连隐藏文本一起翻，viewport 不会），`pending` 仍为 true 属预期。
 - 观察器：还原后滚动不再发请求；隐藏标签页暂停、恢复后补扫（`smoke:dom` 覆盖）。
 - **本轮定位并修复的问题**：视口首屏的候选会按 provider 策略攒成一个 8k / 217 段的单请求，LLM 首屏要等整批输出（实测 265s）。视口首屏与续翻改为 **2000 字符 / 60 段**（并发不变），整页模式仍用完整策略；DeepL 原本就是 50 段/批，不受影响。
 - 修复后 LLM 首屏达成目标：Wikipedia + `deepseek-v4.1-flash` 首屏 **14.0s / 4 批 / 2,993 字符**，对比 B6 整页 142s，约 **10%**（≤1/3）。
