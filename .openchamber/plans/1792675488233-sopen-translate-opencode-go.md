@@ -1780,17 +1780,22 @@ UX 优先的做法：**Edge 内部接口做默认零配置**；Index-Translate �
 - 四页均 `failed 0`，`p/li/td` 数量不变，还原后 `.sopen-translated-block` 为 0。
 - 请求 URL 带 `to=zh-Hans`，没有 Authorization / key / region 头；body 是纯字符串数组。
 
-**A/B（Wikipedia 首屏，MT only vs MT + 审校）**
+**A/B（四页首屏，MT only vs MT + 审校，同目标 zh-Hans）**
 
-| 指标 | MT only | MT + 审校 |
-| --- | --- | --- |
-| 首屏耗时 | 1.8s | 4.45s |
-| 送审段数 | — | 46（`truncated: false`） |
-| 修正段数 | — | 5 |
-| 失败 | — | `false` |
+同一轮 Edge MT 主翻译；审校用 OpenCode Go `deepseek-v4.1-flash`。临时插桩在扩展副本里统计批次/字符/token，未进仓库。
 
-- 审校把首屏增加约 2.6s，修正 5/46，收益有限。结论：**审校保持可选（默认 `reviewProviderId = null`），不设为默认层**；符合 F5「收益不足不上审校层」。
-- `opencode.ai/go` 的 A/B：MT only 2.2s；MT + 审校 3.2s，送审 2 段、修正 0；该页 MT 本身已保留型号，审校没有收益。
+| 页面 | MT only 首屏 | MT + 审校首屏 | MT 请求 | MT 字符 | 审校请求 | 送审 / 修正 | LLM tokens | 失败 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `opencode.ai/go` | 2.2s | 4.05s | 1 | 602 | 1 | 2 / 0 | 262 | 0 |
+| GitHub issue #55772 | 1.6s | 4.57s | 3 | 2,916 | 3 | 22 / 2 | 1,344 | 0 |
+| `linux.org/pages/download` | 0.7s | 2.95s | 1 | 450 | 1 | 2 / 0 | 264 | 0 |
+| `en.wikipedia.org/wiki/Linux` | 1.8s | 3.00s | 4 | 2,993 | 4 | 46 / 4 | 2,157 | 0 |
+| **合计** | — | — | **9** | **6,961** | **9** | **72 / 6（8.3%）** | **4,027** | 0 |
+
+- 表中耗时是「首屏 / 初始视口」一轮的耗时（0 次滚动），四页同范围；整页总耗时未在本轮重复测（B6/E6 已有整页数据）。
+- 审校让首屏增加约 1.1–3.0s（约为 MT 的 1.5–4 倍）；修正 6/72，收益有限。
+- 人工抽检 20 段 MT 输出：发现 4 处规则未命中的语义错误（`Use with any agent` → “任何药物都用”、`New posts` → “新职位”、`Tested for agentic coding` → “检测代理编码”、`Explore different` → “探索不同的领域”），以及 `Zen` → “禅” 这类品牌误译。它们不满足术语缺失 / 空译 / 长度比 / 脚本 / 数字 / URL / 占位符 / 重复任一条件，审校层不会送审。修正的 6 段由规则命中触发，未逐条导出复核。
+- 结论：**收益不足，不上默认审校层**；`reviewProviderId` 默认 `null`，只保留手动开启。这符合 F5「收益不足就不上审校层」。
 - Azure：没有 key，未真机；协议、region/key 头、body 形状由 `npm run smoke` 覆盖，预设仍标「接口未实测」。
 - Index-Translate：只加了本地代理预设，没有跑代理；公网直连 412 的说明写在 hint 与 README。
 - 回归：`check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
