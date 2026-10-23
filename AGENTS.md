@@ -1,6 +1,6 @@
 # AGENTS.md
 
-MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运行时依赖、无 CI。验证靠三个 Node 脚本（`check` / `smoke` / `smoke:dom`）和一个离线词库构建。
+MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运行时依赖、无 CI。验证靠三套命令（`npm run check` / `npm run smoke` / `npm run smoke:dom`）和一个离线词库构建。
 
 ## 已拍板的决定（别推翻）
 
@@ -15,7 +15,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - **不要直接在 `main` 上开发。** 每个任务/阶段从最新 `main` 拉分支：
   `git switch main && git pull && git switch -c feat/<topic>`。
 - 分支上小步提交；跑完该阶段验收后再合并：
-  `git switch main && git merge --no-ff feat/<topic>`，然后 `git push origin main`。
+  `git switch main && git merge --no-ff feat/<topic>`，然后 `git push origin main`；推送前按全局规则确认（push 属于高风险操作）。
 - 合并前必须 `npm run check` + `npm run smoke` + `npm run smoke:dom` 全绿；冲突在分支上解决。
 - 不要 force-push `main`；不要为了省事直接 commit 到 `main`（除非用户明确要求）。
 - 命名用 `feat/...`、`fix/...`，一个分支只做一件事。
@@ -50,6 +50,9 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - DeepL、微软 MT（`microsoft-edge` / `microsoft-azure`）与 Google 免费接口完全跳过术语层（不注入、不校验、不回退）。
 - 语言只有 `lib/languages.js` 一个来源（LLM 用 `name`，DeepL 用 `code`，微软用 `ms`，Google 免费接口用 `google`）。
 - 审校层只处理规则筛出的可疑段：`lib/review.js` 是纯函数，`providers.js` 的 `reviewTranslations()` 负责发一次 LLM 请求。审校失败/解析失败/校验不过一律保留主译文，不整段回退；审校服务必须是 LLM（`supportsGlossary !== false`）。
+- 审校当前是**同步**的：`background.translate()` 会 `await reviewTranslations()`；`reviewProviderId` 默认 `null`，关闭时零请求、零延迟。
+- 当前代码不限制主翻译类型：LLM 主翻译配了审校也会跑。H 计划（审校异步化 + MT-only）尚未落地，别把计划当现状。
+- 主翻译的术语校验只看本批 `termsForPrompt`（≤40）；审校的 `findSuspicious()` 用完整词表 `compiled.terms`（MT 无 prompt；LLM 主翻译目前的审校仍是额外一层）。
 - 审校预算按 content 传来的 `pageToken` 在 background 累计（每页 200 段 / 8,000 字符）；滚动续翻共用 token，还原/重新翻译换新 token。不要改成按单批计算。
 - 审校响应只接受 `{ segments: [{ index, corrected }] }`：index 必须属于送审集合、corrected 非空；越界 / 重复 / 非整数 / 空值条目直接丢弃。解析失败算审校失败，不整段回退。
 - 修正按模型返回的 `index` 对齐，不再依赖顺序；不要改成按数组位置写回。
@@ -82,7 +85,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 - `npm run check` —— `tsc -p .`（`noEmit` 在 tsconfig 里）。改完必须零错误。
 - `npm run smoke` —— 协议解析、`response_format` / 思考字段回退、429、模型列表、术语三档、迁移、思考映射；stub `fetch`，不联网。
-- `npm run smoke:dom` —— 假 DOM 加载真实 `content.js`：渲染、还原、双轮、并发、失败补跑、熔断、进度。
+- `npm run smoke:dom` —— 假 DOM 加载真实 `content.js`：渲染、还原、双轮、视口/滚动、并发、失败补跑、熔断、进度。
 - 两个冒烟脚本都不支持按用例过滤；单测就临时抽一个用例单独跑，不要改脚本参数硬跑。
 - `npm run build:glossary`；改 allowlist / snapshot / blocklist 后必须再跑 `npm run build:glossary -- --check`。`build:glossary:snapshot` 是维护者手动联网脚本，不参与构建。
 - `node --check extension/<file>.js`；`Get-Content extension\manifest.json -Raw | ConvertFrom-Json` 按需验语法 / manifest。
@@ -92,6 +95,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 ## 计划与本地工具
 
 - `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md` 是施工图与验收记录。阶段 A–F 与 G1 均已落地（含 E 的视口优先 / 滚动续翻、F 的微软翻译 + 可选审校、G1 的 Google 免费接口 stub）；G2 只做了 spike（`downloadable`，未接入）。
+- OpenChamber 计划面板里的 H 计划（审校异步化 + NVIDIA + UI/README 重写）**尚未落地**：当前没有 NVIDIA 预设、没有异步审校、没有新 UI；不要按计划假设代码已存在。
 - `.agents/` 与 `skills-lock.json` 是本地安装的 agent skill（含 `chrome-extensions`），已 gitignore，不要提交。
 - 参考 KISS Translator 时只借鉴思路 / 默认值；它是 **GPL-3.0**，不要复制源码、prompt、资源，也不要作为依赖引入。
 
@@ -100,7 +104,6 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 不要给 `#sopen-translate-ui` 加 inline `all: initial`：会重置 `position` / `pointer-events`。
 - `response_format` 回退只在 400/404/422；401/403/429 直接上抛，否则一次 429 会变成 8 次请求。
 - Microsoft Edge 是浏览器内部接口：`POST /translate/translatetext?...`，body 是**纯字符串数组**，没有 Authorization；Azure 是 `[{ Text }]` + `Ocp-Apim-Subscription-Key`（区域资源还要 `Ocp-Apim-Subscription-Region`）。两者响应同形，别把 body 混用。
-- 审校服务必须是 LLM；配成 DeepL / 微软会让审校直接标记失败。审校修正按顺序对齐，不要改成依赖模型返回的 `index`。
 - Google 免费接口一次只能发一个 `q`，长文本按 ≤1600 字符切开串行请求；本机网络实测不可达，预设只做 stub、不做默认。
 - 双语会跳过含 `PRE/CODE/KBD/SAMP/...` 后代的块（含内联 `<code>`），这是有意的覆盖率损失。
 - 视口判定的 rect 全 0 视为隐藏/未布局；`smoke:dom` 的假 DOM 默认给可见 rect，测视口用例时用 `offscreen(el)` 设置元素 rect。
