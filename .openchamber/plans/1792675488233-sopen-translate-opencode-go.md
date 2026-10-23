@@ -1795,6 +1795,7 @@ UX 优先的做法：**Edge 内部接口做默认零配置**；Index-Translate �
 - 表中耗时是「首屏 / 初始视口」一轮的耗时（0 次滚动），四页同范围；整页总耗时未在本轮重复测（B6/E6 已有整页数据）。
 - 审校让首屏增加约 1.1–3.0s（约为 MT 的 1.5–4 倍）；修正 6/72，收益有限。
 - 人工抽检 20 段 MT 输出：发现 4 处规则未命中的语义错误（`Use with any agent` → “任何药物都用”、`New posts` → “新职位”、`Tested for agentic coding` → “检测代理编码”、`Explore different` → “探索不同的领域”），以及 `Zen` → “禅” 这类品牌误译。它们不满足术语缺失 / 空译 / 长度比 / 脚本 / 数字 / URL / 占位符 / 重复任一条件，审校层不会送审。修正的 6 段由规则命中触发，未逐条导出复核。
+- 样本术语保留率 **11/11（100%）**：GitHub 3/3、linux.org 7/7、opencode.ai 1/1；Wikipedia 抽样的 20 段没有内置词表命中。`Go` / `Zen` 这类短词不在词表内（故意的），仍会被 MT 译掉。
 - 结论：**收益不足，不上默认审校层**；`reviewProviderId` 默认 `null`，只保留手动开启。这符合 F5「收益不足就不上审校层」。
 - Azure：没有 key，未真机；协议、region/key 头、body 形状由 `npm run smoke` 覆盖，预设仍标「接口未实测」。
 - Index-Translate：只加了本地代理预设，没有跑代理；公网直连 412 的说明写在 hint 与 README。
