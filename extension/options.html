@@ -66,7 +66,24 @@
         </label>
         <p id="enforcement-help" class="muted"></p>
         <p class="muted">
-          DeepL 没有 prompt 通道，不支持术语保护；配了 DeepL 时这一节不生效。
+          DeepL 与微软翻译没有 prompt 通道，不支持术语保护；配了它们时这一节不生效。
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>审校服务（可选）</h2>
+        </div>
+        <label class="field">
+          <span>主翻译完成后，用另一个 LLM 只修正可疑段</span>
+          <select id="review-provider" class="input"></select>
+        </label>
+        <p class="muted">
+          规则先筛出术语缺失、空译、与原文相同、长度/数字/URL/占位符异常、相邻重复的段，
+          最多送审 200 段 / 8,000 字符；不通过校验的修正会被丢弃，保留主译文。
+        </p>
+        <p class="muted">
+          隐私：页面文本会发给主翻译服务；配置审校后，可疑段还会发给所选的审校服务。
         </p>
       </section>
 

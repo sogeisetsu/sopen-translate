@@ -17,6 +17,7 @@
 import { ProviderError, fail } from './http.js';
 import { getProtocol } from './protocols.js';
 import { compileGlossary, matchTerms, promptTerms, verifySegment } from './glossary.js';
+import { applyReviewCorrections, buildReviewRequest, findSuspicious } from './review.js';
 
 /**
  * @param {string[]} translations
@@ -103,8 +104,8 @@ async function runBatch(args, allowSplit) {
   } = args;
   const protocol = getProtocol(config.protocol);
 
-  // DeepL 没有 prompt 通道：完全跳过术语层，不注入、不校验、不回退。
-  if (protocol.id === 'deepl') {
+  // DeepL / 微软 MT 没有 prompt 通道：完全跳过术语层，不注入、不校验、不回退。
+  if (protocol.supportsGlossary === false) {
     const translations = await protocol.translate({
       texts,
       config,
@@ -209,6 +210,69 @@ async function runBatch(args, allowSplit) {
   }
 
   return { translations, protected: protectedCount, warnings };
+}
+
+/**
+ * 审校层：主翻译（尤其是 MT）之后，只把规则筛出的可疑段交给第二个 LLM 修正。
+ * 失败、数量不符、校验不过的修正都保留主译文，绝不整段回退。
+ *
+ * @param {Object} args
+ * @param {string[]} args.sources
+ * @param {string[]} args.translations
+ * @param {ProviderConfig} args.config 审校服务
+ * @param {string} args.target
+ * @param {string} args.targetCode
+ * @param {string[]} [args.glossary]
+ * @param {Record<string, string>} [args.extraHeaders]
+ * @param {{ delays: number[] }} [args.retry]
+ * @returns {Promise<{ translations: string[], review: import('../../types').ReviewOutcome }>}
+ */
+export async function reviewTranslations({
+  sources,
+  translations,
+  config,
+  target,
+  targetCode,
+  glossary = [],
+  extraHeaders,
+  retry,
+}) {
+  const protocol = getProtocol(config.protocol);
+  const compiled = compileGlossary(Array.isArray(glossary) ? glossary : []);
+  const { items, truncated } = findSuspicious({ sources, translations, compiled, targetCode });
+  const base = { reviewed: items.length, corrected: 0, failed: false, truncated };
+
+  // 审校服务必须是能接收 prompt 的 LLM；配成 MT 说明配置有问题，直接标记失败
+  if (protocol.supportsGlossary === false) {
+    return { translations, review: { ...base, failed: true } };
+  }
+  if (items.length === 0) return { translations, review: base };
+
+  try {
+    const request = buildReviewRequest({ target, items, sources, translations });
+    const corrected = await protocol.translate({
+      texts: [],
+      config,
+      target,
+      targetCode,
+      terms: [],
+      extraHeaders,
+      retry,
+      system: request.system,
+      userContent: request.userContent,
+    });
+    if (corrected.length !== items.length) {
+      return { translations, review: { ...base, failed: true } };
+    }
+    const applied = applyReviewCorrections({ sources, translations, items, corrected, compiled });
+    return {
+      translations: applied.translations,
+      review: { ...base, corrected: applied.corrected },
+    };
+  } catch (err) {
+    console.warn('[sopen-translate] 审校失败，保留主译文', err);
+    return { translations, review: { ...base, failed: true } };
+  }
 }
 
 /* --------------------------- 旧调用方兼容入口 --------------------------- */

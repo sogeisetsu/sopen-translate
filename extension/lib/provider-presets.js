@@ -13,6 +13,7 @@
  * @property {string[]} models
  * @property {boolean} supportsModelList
  * @property {boolean} [requiresSession] 请求必须带 x-opencode-session
+ * @property {boolean} [requiresKey]     false = API Key 可空（自定义 / 本地代理 / Edge）
  * @property {boolean} verified
  * @property {string} [hint]
  */
@@ -149,12 +150,46 @@ export const PROVIDER_PRESETS = [
     hint: '不支持术语保护；免费版用 api-free，付费版用 api.deepl.com。',
   },
   {
+    id: 'index-translate',
+    label: 'Index-Translate（本地代理）',
+    protocol: 'openai-chat',
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    models: ['Index-Translate-35B-A3B'],
+    supportsModelList: false,
+    requiresKey: false,
+    verified: false,
+    hint: '免费；需自行运行本地代理（见 README）。浏览器直连公网接口会被 WAF 拦（412）。',
+  },
+  {
+    id: 'microsoft-edge',
+    label: 'Microsoft Edge 翻译',
+    protocol: 'microsoft-edge',
+    baseUrl: 'https://edge.microsoft.com',
+    models: [],
+    supportsModelList: false,
+    requiresKey: false,
+    verified: true,
+    hint: '无需 key；Edge 内置翻译接口，四个验收页已实测。无 SLA，可能失效/限流；页面文本会发给微软。',
+  },
+  {
+    id: 'microsoft-azure',
+    label: 'Microsoft Azure Translator',
+    protocol: 'microsoft-azure',
+    baseUrl: 'https://api.cognitive.microsofttranslator.com',
+    models: [],
+    supportsModelList: false,
+    requiresKey: true,
+    verified: false,
+    hint: '需要 API Key；区域资源还要填 Region。页面文本会发给微软。',
+  },
+  {
     id: 'custom',
     label: '自定义',
     protocol: 'openai-chat',
     baseUrl: '',
     models: [],
     supportsModelList: true,
+    requiresKey: false,
     verified: false,
     hint: 'OpenAI 兼容接口；本地 Ollama / One-API 可以不填 API Key。',
   },
