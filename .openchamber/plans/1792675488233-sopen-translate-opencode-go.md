@@ -10,6 +10,7 @@
 **已完成并推送**：阶段 A、B（含 B6）、C、D，以及 E2（关闭思考）。仓库版本 `0.2.0`，
 `check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
 **剩余工作只有**：E1、E3–E6（视口优先 + 滚动续翻）和 F1–F5（微软翻译 + 可选 AI 定点修正）。
+G1/G2（Google 免费接口 / 设备端 Translator API）是**可选实验**，排在 E、F 之后；G2 先 spike，通过再接入。
 **不要重做 A–D**；它们的细节是历史记录，只在新改动碰到时查阅。
 
 ### 施工顺序与分支（硬约束）
@@ -37,6 +38,8 @@
 | F3 | `lib/providers.js`、`background.js`、`lib/settings.js`、`options.*` | `smoke` + Edge 真机 |
 | F4 | `options.*` | 手工 |
 | F5 | `scripts/smoke.mjs` | 四页 A/B |
+| G1 | `lib/protocols.js`、`lib/provider-presets.js`、`options.*` | stub + 记录本机网络失败 |
+| G2 | `content.js` / `popup.*`（先 spike，不改产品代码） | spike 结论；可用再补 3 段真机 |
 
 **F 的 key 前提**：`microsoft-edge` 走 Edge 内置翻译接口，**不需要 key**，F5 可以直接真机跑；
 `index-translate` 也不需要 key，但浏览器直连 412，需要本地代理；
@@ -110,6 +113,8 @@ Edge 是内部接口，Index-Translate 是公网免费接口，都可能随时�
 - [ ] F3 可选 AI 定点修正：第二 provider，只审可疑段、返回修正译文
 - [ ] F4 设置页：微软 `region` + 「审校服务」下拉 + 隐私说明
 - [ ] F5 验收：Edge 免费接口四页 A/B；Azure 有 key 再补；收益不足就不上审校层
+- [ ] G1 Google 免费网页接口（本机网络不可达，仅实现 + stub）
+- [ ] G2 设备端 `Translator` API spike（通过再接入）
 
 ---
 
@@ -128,6 +133,8 @@ Edge 是内部接口，Index-Translate 是公网免费接口，都可能随时�
 | Microsoft Edge 翻译（免费） | 无需 key | 阶段 F 默认；Edge 内部接口，可能失效/限流 |
 | Microsoft Azure Translator | 无需选模型 | 可选；需要 key + region，F0 2M 字符/小时 |
 | B 站 Index-Translate（免费） | `Index-Translate-35B-A3B` | 公网 API 免 key；**浏览器直连 412**，需本地代理 `127.0.0.1:8080` |
+| Google 免费网页接口 | 无需 key | 本机 `fetch failed`（网络不可达）；只 stub，不声称可用 |
+| 浏览器 `Translator` API | 无需 key | 桌面 Chrome 138+ / Edge 148+；先 spike 再定 |
 
 其它约束：
 
@@ -1639,7 +1646,9 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 - 请求：`POST https://edge.microsoft.com/translate/translatetext?from=&to=<msCode>&isEnterpriseClient=false`
   - 头：只 `Content-Type: application/json`；**没有 Authorization / key / region**。
   - Body：**纯字符串数组** `["text1", "text2"]`（不是 Azure 的 `[{Text}]`）。
-  - 响应：`[{ id, result: ["译文", "检测到的源语言"] }]`；按 `id` 排序后取 `result[0]`，并校验数量。
+  - 响应（2026-10-23 实测）：`[{ detectedLanguage: { language, score }, translations: [{ text, to }] }]`；
+    按输入顺序取 `translations[0].text`，并校验数量。与 Azure 响应同形，可复用解析。
+- 实测：2 段英文→简体中文 200，返回“Linux是一个内核。/ Kubernetes 是一个调度器。”，无 key。
 - 这是 Edge 浏览器内置翻译在用的内部接口：无 SLA、可能限流/改路径/加鉴权；失败时要能退回 Azure 或自定义。
   （接口契约参考 KISS Translator 的行为与测试；它是 GPL-3.0，只参考行为，代码独立实现。）
 - 限额未公开：先按 **100 段 / 5,000 字符/请求、并发 4** 起步，用真机实测再调；`from` 留空自动检测。
@@ -1729,6 +1738,64 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 - 多一个第三方数据流向；设置页和 README 要写清楚。
 - 第二 provider 的选择/存储/还原语义比单 provider 复杂，先做同步审校，异步补丁另开一步。
 - Index-Translate 公网接口对浏览器/扩展返回 412（WAF），必须本地代理；免费额度与稳定性无保障，不能当唯一主翻译。
+
+---
+
+# 阶段 G：浏览器免费翻译接入（2026-10-23 追加，可选）
+
+## G0 结论
+
+“浏览器内置翻译”有三条不同的路，不能混：
+
+1. **Edge 内部接口**（F1a）：已实测 200、无 key、Azure 同形响应。**推荐默认**。
+2. **Chrome/Google 免费网页接口**：本机网络 `fetch failed`（被挡）；Chrome 的“内置翻译”背后就是 Google，不能当已验证项。
+3. **设备端 `Translator` API**（Chrome 138+ / Edge 148+）：官方 Web API、无 key、本地推理；但只有约 39 种语言、桌面端、首次要下载语言包、下载需用户手势，扩展里能否用要实测。
+
+## G1 `google-free`（Chrome/Google 免费网页接口，可选）
+
+- 端点：`GET https://translate.googleapis.com/translate_a/single?client=gtx&dj=1&dt=t&ie=UTF-8&sl=auto&tl=<code>&q=<text>`
+- 无 key；响应 `{ sentences: [{ trans }], src }`。
+- 批量：每个请求只能一个 `q`，长文本要切到 1,500–1,800 字符/请求，串行或低并发；不适合直接套用 LLM 的 8k/批。
+- **本机实测 `fetch failed`**（Google 网络不可达）。所以只实现 + stub，设置页标「接口未实测 / 本机网络不可达」，**不做默认**。
+- `translate-pa.googleapis.com/v1/translateHtml` 是 2026 年可用的 CORS 网关，但需要 Google te_lib 的公开共享 key；按仓库禁钥规则**不写进仓库**，最多做成“用户自填”的可选项，不纳入默认验收。
+- 风险：非官方、随时 403/302/captcha；不保证中国大陆网络可用。
+
+## G2 设备端 `Translator` API（Chrome 138+ / Edge 148+，先 spike）
+
+- 官方 Web API：`Translator.availability({ sourceLanguage, targetLanguage })` →
+  `available | downloadable | downloading | unavailable`；`Translator.create` / `translate` / `translateStreaming`。
+- 无 key、本地推理；桌面端；约 39 种语言（含 zh / zh-Hant / en / ja / ko / fr / de / es / ru / pt）；
+  首次下载语言包，`downloadable` 时 `create()` **必须由用户手势触发**；翻译串行。
+- 扩展里的关键未知：content script 的 isolated world 是否暴露 `Translator`；popup 点击的手势能否用于下载；
+  service worker 不可用（API 不在 Worker 里）。**先做 spike**：
+  1. 在 options/popup 与 content script 里检查 `'Translator' in self`；
+  2. 检查 `en → zh` 的 availability；
+  3. 已 available 时在 content script 里 create/translate 是否能跑；
+  4. 若必须手势，评估“popup 点一次下载，之后 content 用”的路径。
+- spike 通过：加一个「本地翻译（实验）」provider，内容直接调用，不经过 background 出网
+  （设备端不算出网，但要在 AGENTS/README 写明这个例外）。
+- spike 不通过：只记录结论，不硬做；不要为它加 `declarativeNetRequest` 或后台代理。
+- 质量/性能：设备端模型质量低于云服务；首次下载可能数百 MB；长页面串行会慢，适合短页面/隐私优先。
+
+## G3 与现有阶段的关系
+
+- Edge（F1a）是默认免费项；Index-Translate（F1c）需本地代理；Google 免费接口（G1）本机不可达；
+  设备端 API（G2）是可选实验。
+- F 的「MT + AI 定点修正」仍适用：G1/G2 的译文也可以走 F2/F3。
+- 优先级不变：**先 E，再 F，最后 G**；G2 先 spike，不通过就停。
+
+## G 验收
+
+- G1：stub 测试 + 真机直连（本机预期失败，记录错误）；设置页标「接口未实测」。
+- G2：spike 结论（可用/不可用 + 原因）；可用则 3 段中译 + 语言包状态 + 还原。
+- 回归：`check` / `smoke` / `smoke:dom` 全绿。
+
+## G 风险
+
+- Google 免费接口是非官方的，随时失效；本机网络已不可达。
+- `Translator` API 需要 Chrome 138+ / Edge 148+ 桌面端；移动端 / Firefox 不支持；语言包下载与用户手势限制。
+- 设备端翻译质量低于云端，长页面串行会明显变慢。
+- 在扩展里使用设备端 API 的可行性未验证，先 spike 再决定。
 
 ---
 
