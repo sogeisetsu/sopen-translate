@@ -47,15 +47,17 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 隐藏标签页暂停补翻；`page.status` 额外返回 `scope` 与 `pending`（是否还有可见未处理候选）。
 - 只有第 0 批失败立即中止；连续 3 批失败熔断，保留已翻部分。
 - 术语只校验本批注入 prompt 的 ≤40 条（`termsForPrompt`），不要拿完整词表校验。
-- DeepL、微软 MT（`microsoft-edge` / `microsoft-azure`）与 Google 免费接口完全跳过术语层（不注入、不校验、不回退）。
-- 语言只有 `lib/languages.js` 一个来源（LLM 用 `name`，DeepL 用 `code`，微软用 `ms`，Google 免费接口用 `google`）。
-- 审校层只处理规则筛出的可疑段：`lib/review.js` 是纯函数，`providers.js` 的 `reviewTranslations()` 负责发一次 LLM 请求。审校失败/解析失败/校验不过一律保留主译文，不整段回退；审校服务必须是 LLM（`supportsGlossary !== false`）。
-- 审校当前是**同步**的：`background.translate()` 会 `await reviewTranslations()`；`reviewProviderId` 默认 `null`，关闭时零请求、零延迟。
-- 当前代码不限制主翻译类型：LLM 主翻译配了审校也会跑。H 计划（审校异步化 + MT-only）尚未落地，别把计划当现状。
-- 主翻译的术语校验只看本批 `termsForPrompt`（≤40）；审校的 `findSuspicious()` 用完整词表 `compiled.terms`（MT 无 prompt；LLM 主翻译目前的审校仍是额外一层）。
-- 审校预算按 content 传来的 `pageToken` 在 background 累计（每页 200 段 / 8,000 字符）；滚动续翻共用 token，还原/重新翻译换新 token。不要改成按单批计算。
-- 审校响应只接受 `{ segments: [{ index, corrected }] }`：index 必须属于送审集合、corrected 非空；越界 / 重复 / 非整数 / 空值条目直接丢弃。解析失败算审校失败，不整段回退。
-- 修正按模型返回的 `index` 对齐，不再依赖顺序；不要改成按数组位置写回。
+- DeepL、微软 MT（`microsoft-edge` / `microsoft-azure`）、Google 免费接口与 `nvidia-riva` 完全跳过术语层（不注入、不校验、不回退）。
+- 语言只有 `lib/languages.js` 一个来源（LLM 用 `name`，DeepL 用 `code`，微软用 `ms`，Google 免费接口用 `google`，Riva 用 `rivaPair()` 拼语言对）。
+- 审校层只处理规则筛出的可疑段：`lib/review.js` 是纯函数（候选、严重度、二次校验），`providers.js` 的 `reviewTranslations()` 接收 `ReviewRunItem[]` 并返回 `{corrections, rejected, review, usedChars}`；它不碰 DOM。审校失败/解析失败/校验不过一律保留主译文，不整段回退；审校服务必须是 LLM（`supportsGlossary !== false`）。
+- 审校是**异步**的：`background.translate()` 只返回主译文 + `reviewCandidates`，**不 await 审校**；content 用 400ms 防抖合并候选，主动发 `review.run`。`reviewProviderId` 默认 `null`，关闭时零请求。
+- **MT-only 门禁**：主 provider 的 `protocol.supportsGlossary !== false`（LLM）时，translate 直接返回 `reviewSkipped: "llm-primary"` 且不给候选。LLM 主翻译不再跑第二层审校；不要恢复 LLM 双跑，除非另加显式开关。
+- 主翻译的术语校验只看本批 `termsForPrompt`（≤40）；审校的 `findSuspicious()` 用完整词表 `compiled.terms`（MT 无 prompt）。
+- 审校预算按 content 传来的 `pageToken` 在 background 累计（每页 200 段 / 8,000 字符）；滚动续翻共用 token，还原/重新翻译换新 token。不要改成按单批计算。`selectReviewItems()` 负责按预算裁剪并标记 `truncated`。
+- 审校响应只接受 `{ segments: [{ index, corrected }] }`，index 必须属于送审集合；background 把 index 映射回 content 的 `id`，content 只认 id，不依赖批次顺序。
+- 修正要在 content 里按 segment id 打补丁：纯译文改 `node.nodeValue`，双语改对应 chunk 后重新 `joinChunks()` 并更新同一个 span；`isConnected === false` 就跳过。
+- `resetPage()` 必须递增 `generation` 并清空审校队列/timer/log/targets；晚到的 `review.run` 响应 generation 不一致直接丢弃。`page.restore` 同样走 `resetPage()`。
+- 审校 diff 只在内存里（最多 100 条），`page.review` / `page.review.undo` 不持久化；undo 只回滚 applied 条目，不影响还原语义。
 - `glossary-data.json` 只由 `npm run build:glossary` 生成，不手改，运行时不联网。
 - `models.list` 可以用草稿配置发请求，但只通过 `patchProvider` 把缓存写回「已保存且配置一致」的 provider。
 - 设置 schema 是 v2；迁移幂等（`ZH → ZH-HANS`）；`getSessionId()` 单独写入，不要塞进 `getSettings()`。
@@ -63,12 +65,12 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 ## 分批、并发、思考（2026-10 实测）
 
-- 按 provider 策略：LLM 8000 字符 / 400 段 / 8 路；DeepL 3000 / 50 / 4（50 是 DeepL 单请求上限）；商汤 6000 / 300 / 1；微软 MT 5000 / 100 / 4（Azure 单请求上限远高于此，取保守值）；Google 免费接口 1500 / 10 / 1（一次一个 q，必须串行）。
+- 按 provider 策略：LLM 8000 字符 / 400 段 / 8 路；DeepL 3000 / 50 / 4（50 是 DeepL 单请求上限）；商汤 6000 / 300 / 1；微软 MT 5000 / 100 / 4（Azure 单请求上限远高于此，取保守值）；Google 免费接口 1500 / 10 / 1（一次一个 q，必须串行）；Riva 3000 / 10 / 2（协议内部一段一请求，实测多行会并成一段）。
 - 视口首屏 / 续翻在上面的策略之上再收紧到 2000 字符 / 60 段（并发不变）：否则首屏候选会攒成一个 8k 大请求，第一批译文要等整批返回。整页模式仍用完整策略。
 - 失败批在主线结束后用 2 路补跑一次，仍失败才计入 `failed`；并发下熔断可能多带最多 `并发数-1` 批。
 - 输出被截断（分段数不符 / JSON 解析失败）时自动二分重试；HTTP 401/429 不拆，避免放大请求。
 - `postJson` 默认超时 **120 秒**——400 段批次实测 28s+，30 秒会误杀。
-- 翻译默认关闭思考：`lib/reasoning.js` 按预设 + 模型返回字段。强制思考、不能发关闭字段：`glm-5.3*`、`kimi-k3`、`MiniMax-M3.1-Flash`；OpenAI `gpt-6.1-sol` / `gpt-6-astra` 不支持 `none`，靠 400 回退。
+- 翻译默认关闭思考：`lib/reasoning.js` 按预设 + 模型返回字段。强制思考、不能发关闭字段：`glm-5.3*`、`kimi-k3`、`MiniMax-M3.1-Flash`；OpenAI `gpt-6.1-sol` / `gpt-6-astra` 不支持 `none`，靠 400 回退。NVIDIA 的 `minimaxai/minimax-m3.1-flash` 实测接受 `reasoning_effort: "none"`。
 - 400 时先只去掉思考字段（保留 `response_format`），仍失败才去掉 `response_format`；被拒的配置记入模块级 Set，后续批次不再发。
 - OpenCode Go 必须发 `x-opencode-session`（`getSessionId()` 生成），漏发全网 400；`User-Agent` 只作 best-effort。
 - 长块按句切到 ≤1200 字符；拼回时 CJK 句末不加空格，拉丁句末加空格。
@@ -76,16 +78,16 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 ## 加翻译服务
 
 1. 预设：`extension/lib/provider-presets.js` 的 `PROVIDER_PRESETS` 加一条（`id/label/protocol/baseUrl/models/supportsModelList/verified`）；`{baseUrl}/models` 不是通用推导时补 `modelsUrl`。
-2. 协议：现有八种（`openai-chat` / `openai-responses` / `anthropic-messages` / `google-gemini` / `microsoft-edge` / `microsoft-azure` / `google-free` / `deepl`）。新协议加进 `extension/lib/protocols.js` 的 `PROTOCOLS`，并补 `types.d.ts` 的 `ProtocolId`；MT 协议要设 `supportsGlossary: false`。
-3. 需要额外字段（如微软的 `region`）时，同时改 `ProviderConfig`、`normalizeSettings` 和设置页卡片。
+2. 协议：现有九种（`openai-chat` / `openai-responses` / `anthropic-messages` / `google-gemini` / `microsoft-edge` / `microsoft-azure` / `google-free` / `deepl` / `nvidia-riva`）。新协议加进 `extension/lib/protocols.js` 的 `PROTOCOLS`，并补 `types.d.ts` 的 `ProtocolId`；MT 协议要设 `supportsGlossary: false`。
+3. 需要额外字段（如微软的 `region` / Riva 的 `sourceLang`）时，同时改 `ProviderConfig`、`normalizeSettings` 和设置页卡片。
 
 设置页按预设渲染，不再依赖 `PROVIDER_TYPES` / `type.fields`（那只是旧调用方的兼容入口）。微软 Edge / Azure 已实现；Index-Translate 只提供本地代理预设。
 
 ## 验证
 
 - `npm run check` —— `tsc -p .`（`noEmit` 在 tsconfig 里）。改完必须零错误。
-- `npm run smoke` —— 协议解析、`response_format` / 思考字段回退、429、模型列表、术语三档、迁移、思考映射；stub `fetch`，不联网。
-- `npm run smoke:dom` —— 假 DOM 加载真实 `content.js`：渲染、还原、双轮、视口/滚动、并发、失败补跑、熔断、进度。
+- `npm run smoke` —— 协议解析、`response_format` / 思考字段回退、429、模型列表、术语三档、迁移、思考映射、审校候选/预算/二次校验、NVIDIA 两个协议、调试日志脱敏/截断/环形缓冲/导出；stub `fetch`，不联网。
+- `npm run smoke:dom` —— 假 DOM 加载真实 `content.js`：渲染、还原、双轮、视口/滚动、并发、失败补跑、熔断、进度、异步审校补丁/竞态/撤销、调试事件。
 - 两个冒烟脚本都不支持按用例过滤；单测就临时抽一个用例单独跑，不要改脚本参数硬跑。
 - `npm run build:glossary`；改 allowlist / snapshot / blocklist 后必须再跑 `npm run build:glossary -- --check`。`build:glossary:snapshot` 是维护者手动联网脚本，不参与构建。
 - `node --check extension/<file>.js`；`Get-Content extension\manifest.json -Raw | ConvertFrom-Json` 按需验语法 / manifest。
@@ -94,8 +96,9 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 
 ## 计划与本地工具
 
-- `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md` 是施工图与验收记录。阶段 A–F 与 G1 均已落地（含 E 的视口优先 / 滚动续翻、F 的微软翻译 + 可选审校、G1 的 Google 免费接口 stub）；G2 只做了 spike（`downloadable`，未接入）。
-- OpenChamber 计划面板里的 H 计划（审校异步化 + NVIDIA + UI/README 重写）**尚未落地**：当前没有 NVIDIA 预设、没有异步审校、没有新 UI；不要按计划假设代码已存在。
+- `.openchamber/plans/1792675488233-sopen-translate-opencode-go.md` 是 A–G 的施工图与验收记录。阶段 A–F 与 G1 均已落地（含 E 的视口优先 / 滚动续翻、F 的微软翻译 + 可选审校、G1 的 Google 免费接口 stub）；G2 只做了 spike（`downloadable`，未接入）。
+- H 计划（`1792748247352-sopen-translate-h.md`）已落地：审校异步化 + MT-only、NVIDIA 双预设、UI 改版、README 重写、本地调试日志。计划文件里记录验收结果；别再按“H 未落地”的旧状态判断代码。
+- 调试日志：`lib/debug-log.js` 是纯函数（脱敏/截断/环形缓冲/导出）；写盘只走 background 的 `debug.log`，串行队列避免并发覆盖。`debugLogEnabled` 默认 false，关闭时零写入；`debugLogSamples` 默认 false，开启才记录 ≤120 字样本。content 只在每轮翻译开始时读一次 `debugLogSamples`。
 - `.agents/` 与 `skills-lock.json` 是本地安装的 agent skill（含 `chrome-extensions`），已 gitignore，不要提交。
 - 参考 KISS Translator 时只借鉴思路 / 默认值；它是 **GPL-3.0**，不要复制源码、prompt、资源，也不要作为依赖引入。
 
@@ -109,6 +112,9 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 视口判定的 rect 全 0 视为隐藏/未布局；`smoke:dom` 的假 DOM 默认给可见 rect，测视口用例时用 `offscreen(el)` 设置元素 rect。
 - `smoke:dom` 的 `window` / `document` 事件与 `MutationObserver` 都是桩：要触发续翻，用 `fireListener(windowListeners, 'scroll')` 或 `fireMutations(...)`。
 - 叶子容器回退：`div/section/article/main` 没有块级后代且文本 ≥40 字才算一块。
+- `nvidia-riva` 的 system **只能**是语言对（`en-zh-cn`）；塞术语/JSON 指令会被当成正文翻译。它一次只发一段，多行输入会被合并，别为了省请求合并。
+- 审校补丁只认 content 生成的 segment id；不要把模型返回的 index 直接写回 DOM（index 是 background 送审切片里的位置，不是页面顺序）。
+- `debug.log` 关闭时由 background 静默丢弃；不要在 content 里新增 storage 读取来判断开关。新增日志事件要同时确认脱敏（key/Bearer/URL `key=`/session）与 samples 门禁。
 - 术语层出问题先关掉设置页的「使用内置词库」复现，再判断是渲染、prompt 还是校验。
 - `tsconfig.json` 的 `noImplicitAny: false` 是故意的；真正生效的是 `strictNullChecks` 与契约检查，别顺手打开。
 - 行为变化同步更新 `README.md`，它同时是对外说明。

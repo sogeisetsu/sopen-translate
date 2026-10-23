@@ -15,8 +15,27 @@ import { loadModelList, parseModelList, resolveModelsUrl } from '../extension/li
 import { normalizeSettings, migrateSettings } from '../extension/lib/settings.js';
 import { compileGlossary, matchTerms, modelTokens } from '../extension/lib/glossary.js';
 import { reasoningOffParams } from '../extension/lib/reasoning.js';
-import { googleCode, microsoftCode } from '../extension/lib/languages.js';
-import { findSuspicious, REVIEW_MAX_SEGMENTS } from '../extension/lib/review.js';
+import { googleCode, microsoftCode, rivaPair } from '../extension/lib/languages.js';
+import {
+  DEBUG_LOG_MAX_ENTRIES,
+  appendDebugEntry,
+  buildDebugExport,
+  formatDebugLine,
+  makeDebugEntry,
+  redactText,
+  sampleText,
+  summarizeSettings,
+  truncateEntry,
+} from '../extension/lib/debug-log.js';
+import {
+  applyReviewCorrections,
+  findSuspicious,
+  pageKind,
+  parseReviewResponse,
+  selectReviewItems,
+  severityOf,
+  REVIEW_MAX_SEGMENTS,
+} from '../extension/lib/review.js';
 
 let failures = 0;
 
@@ -1039,80 +1058,171 @@ await test('review 上限：最多 200 段，超出标记 truncated', async () =
   assert.equal(found.truncated, true);
 });
 
-await test('review 预算：maxSegments 限制本页送审段数，0 时不发请求', async () => {
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return new Response(chatResult([{ index: 0, corrected: 'Kubernetes 简介' }]), { status: 200 });
-  };
-
-  const limited = await reviewTranslations({
-    sources: ['Kubernetes 简介', 'Kubernetes 部署'],
-    translations: ['简介', '部署'],
-    config: chatConfig,
-    target: '简体中文',
+await test('review 候选：只包含命中规则的段，空候选不产生送审项', async () => {
+  const sources = ['Kubernetes 简介', 'hello world', 'See https://example.test'];
+  const translations = ['简介', '你好世界', '参见 https://example.test'];
+  const found = findSuspicious({
+    sources,
+    translations,
+    compiled: compileGlossary(['Kubernetes']),
     targetCode: 'ZH-HANS',
-    glossary: ['Kubernetes'],
-    maxSegments: 1,
   });
-  assert.equal(limited.review.reviewed, 1);
-  assert.equal(limited.review.truncated, true);
-  assert.equal(limited.review.corrected, 1);
-  assert.ok(limited.usedChars > 0);
-  assert.equal(calls, 1);
+  assert.deepEqual(
+    found.items.map((item) => item.index),
+    [0],
+    '干净段不应进入候选',
+  );
 
-  calls = 0;
-  const none = await reviewTranslations({
-    sources: ['Kubernetes 简介'],
-    translations: ['简介'],
-    config: chatConfig,
-    target: '简体中文',
+  const clean = findSuspicious({
+    sources: ['hello world'],
+    translations: ['你好世界'],
+    compiled: noGlossary,
     targetCode: 'ZH-HANS',
-    glossary: ['Kubernetes'],
-    maxSegments: 0,
   });
-  assert.equal(none.review.reviewed, 0);
-  assert.equal(none.review.truncated, true);
-  assert.equal(calls, 0, '预算为 0 时不应发审校请求');
+  assert.equal(clean.items.length, 0);
+  assert.deepEqual(selectReviewItems(clean.items).items, []);
 });
 
-/* ------------------------------ 审校请求 ------------------------------ */
+await test('review 预算：200 段 / 8,000 字符，超出标记 truncated', async () => {
+  const many = Array.from({ length: REVIEW_MAX_SEGMENTS + 5 }, (_, index) => ({
+    id: `n${index}`,
+    source: `source ${index}`,
+    primary: `译文 ${index}`,
+    reasons: ['empty'],
+    missing: [],
+  }));
+  const capped = selectReviewItems(many);
+  assert.equal(capped.items.length, REVIEW_MAX_SEGMENTS);
+  assert.equal(capped.truncated, true);
 
-await test('review：按 index 修正可疑段并保留术语', async () => {
+  const long = Array.from({ length: 10 }, (_, index) => ({
+    id: `n${index}`,
+    source: 'a'.repeat(500),
+    primary: '译'.repeat(500),
+    reasons: ['term'],
+    missing: [],
+  }));
+  const chars = selectReviewItems(long);
+  assert.ok(chars.items.length < long.length);
+  assert.equal(chars.truncated, true);
+
+  const none = selectReviewItems(long, { maxSegments: 0 });
+  assert.equal(none.items.length, 0);
+  assert.equal(none.truncated, true);
+});
+
+await test('review 校验：数字 / URL / 占位符 / HTML 标签 / 脚本 / 长度', async () => {
+  const base = {
+    items: [{ index: 0, reasons: ['term'], missing: [] }],
+    compiled: noGlossary,
+    targetCode: 'ZH-HANS',
+  };
+  /** @param {string} source @param {string} primary @param {string} corrected */
+  const run = (source, primary, corrected) =>
+    applyReviewCorrections({
+      ...base,
+      sources: [source],
+      translations: [primary],
+      corrections: [{ index: 0, corrected }],
+    });
+
+  assert.equal(run('There are 3 hosts', '有主机', '有三台主机').corrected, 0);
+  assert.equal(
+    run('See https://example.test', '参见', '参见 https://example.test').corrected,
+    1,
+  );
+  assert.equal(run('Hello ${name}', '你好', '你好 ${name}').corrected, 1);
+  assert.equal(run('Hello ${name}', '你好', '你好').corrected, 0);
+
+  const html = run('<strong>Hello</strong> world', '<strong>你好</strong> 世界', '你好世界');
+  assert.equal(html.corrected, 0);
+  assert.equal(html.rejected[0].reason, 'html');
+
+  const script = run('hello world', '你好世界', 'hello world again');
+  assert.equal(script.corrected, 0);
+  assert.equal(script.rejected[0].reason, 'script');
+
+  const short = run('a'.repeat(100), '短译', '短');
+  assert.equal(short.corrected, 0);
+  assert.equal(short.rejected[0].reason, 'length');
+});
+
+await test('review 校验：越界 / 重复 / 非整数 / 空值都丢弃', async () => {
+  const result = applyReviewCorrections({
+    sources: ['Kubernetes 简介', 'Kubernetes 部署'],
+    translations: ['简介', '部署'],
+    items: [
+      { index: 0, reasons: ['term'], missing: ['Kubernetes'] },
+      { index: 1, reasons: ['term'], missing: ['Kubernetes'] },
+    ],
+    corrections: [
+      { index: 9, corrected: '越界' },
+      { index: 0, corrected: 'Kubernetes 简介' },
+      { index: 0, corrected: '重复' },
+      { index: 1, corrected: '' },
+    ],
+    compiled: compileGlossary(['Kubernetes']),
+    targetCode: 'ZH-HANS',
+  });
+  assert.deepEqual(result.translations, ['Kubernetes 简介', '部署']);
+  assert.equal(result.corrected, 1);
+  const reasons = result.rejected.map((entry) => entry.reason);
+  assert.deepEqual(reasons, ['duplicate', 'empty']);
+});
+
+await test('review 请求：带页面上下文与前后段，按 id 返回修正', async () => {
   /** @type {Call[]} */
   const calls = [];
   globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(init.body);
     calls.push({ url: '', body, headers: init.headers });
     const payload = JSON.parse(body.messages[1].content);
-    assert.equal(payload.segments.length, 1);
-    assert.equal(payload.segments[0].index, 0);
-    assert.equal(payload.segments[0].source, 'Kubernetes 简介');
+    assert.equal(payload.page.host, 'en.wikipedia.org');
+    assert.equal(payload.page.kind, 'wiki');
+    assert.equal(payload.segments[0].prev, 'Before');
+    assert.equal(payload.segments[0].next, 'After');
     return new Response(chatResult([{ index: 0, corrected: 'Kubernetes 简介' }]), { status: 200 });
   };
 
   const result = await reviewTranslations({
-    sources: ['Kubernetes 简介'],
-    translations: ['简介'],
+    items: [
+      {
+        id: 'n7',
+        source: 'Kubernetes 简介',
+        primary: '简介',
+        reasons: ['term'],
+        missing: ['Kubernetes'],
+        prev: 'Before',
+        next: 'After',
+      },
+    ],
     config: chatConfig,
     target: '简体中文',
     targetCode: 'ZH-HANS',
+    context: { title: 'Linux - Wikipedia', host: 'en.wikipedia.org', kind: 'wiki' },
     glossary: ['Kubernetes'],
   });
 
   assert.equal(result.review.failed, false);
   assert.equal(result.review.reviewed, 1);
   assert.equal(result.review.corrected, 1);
-  assert.deepEqual(result.translations, ['Kubernetes 简介']);
+  assert.deepEqual(result.corrections, [{ id: 'n7', corrected: 'Kubernetes 简介' }]);
   assert.match(calls[0].body.messages[0].content, /JSON/);
-  assert.match(calls[0].body.messages[0].content, /corrected/);
   assert.match(calls[0].body.messages[0].content, /审校/);
 });
 
-await test('review：空修正、无术语时同原文、仍漏术语的条目都丢弃', async () => {
+await test('review 请求：空修正 / 无术语时同原文 / 仍漏术语都拒绝并带原因', async () => {
+  const termItems = [
+    {
+      id: 'n0',
+      source: 'Kubernetes 简介',
+      primary: '简介',
+      reasons: ['term'],
+      missing: ['Kubernetes'],
+    },
+  ];
   const termArgs = {
-    sources: ['Kubernetes 简介'],
-    translations: ['简介'],
+    items: termItems,
     config: chatConfig,
     target: '简体中文',
     targetCode: 'ZH-HANS',
@@ -1123,87 +1233,79 @@ await test('review：空修正、无术语时同原文、仍漏术语的条目�
     new Response(chatResult([{ index: 0, corrected: '' }]), { status: 200 });
   const empty = await reviewTranslations(termArgs);
   assert.equal(empty.review.corrected, 0);
-  assert.deepEqual(empty.translations, ['简介']);
+  assert.deepEqual(empty.corrections, []);
+  assert.equal(empty.rejected[0].reason, 'empty');
 
   // 没有术语缺失时，把译文“修正”成原文等于没翻
   globalThis.fetch = async () =>
     new Response(chatResult([{ index: 0, corrected: 'Hello there' }]), { status: 200 });
   const sameAsSource = await reviewTranslations({
-    sources: ['Hello there'],
-    translations: ['你好'],
+    items: [
+      { id: 'n0', source: 'Hello there', primary: '你好', reasons: ['length'], missing: [] },
+    ],
     config: chatConfig,
     target: '简体中文',
     targetCode: 'ZH-HANS',
     glossary: [],
   });
   assert.equal(sameAsSource.review.corrected, 0);
-  assert.deepEqual(sameAsSource.translations, ['你好']);
+  assert.equal(sameAsSource.rejected[0].reason, 'same-source');
 
   globalThis.fetch = async () =>
     new Response(chatResult([{ index: 0, corrected: '仍然没有术语' }]), { status: 200 });
   const stillMissing = await reviewTranslations(termArgs);
   assert.equal(stillMissing.review.corrected, 0);
-  assert.deepEqual(stillMissing.translations, ['简介']);
+  assert.equal(stillMissing.rejected[0].reason, 'term');
 });
 
-await test('review：请求失败或 JSON 坏掉时保留主译文并标记 failed', async () => {
-  globalThis.fetch = async () => new Response('boom', { status: 500 });
-  const failed = await reviewTranslations({
-    sources: ['Kubernetes 简介'],
-    translations: ['简介'],
+await test('review 请求：失败 / JSON 坏掉 / 429 都保留主译文并标记 failed', async () => {
+  const args = {
+    items: [
+      {
+        id: 'n0',
+        source: 'Kubernetes 简介',
+        primary: '简介',
+        reasons: ['term'],
+        missing: ['Kubernetes'],
+      },
+    ],
     config: chatConfig,
     target: '简体中文',
     targetCode: 'ZH-HANS',
     glossary: ['Kubernetes'],
-  });
+  };
+
+  globalThis.fetch = async () => new Response('boom', { status: 500 });
+  const failed = await reviewTranslations(args);
   assert.equal(failed.review.failed, true);
-  assert.deepEqual(failed.translations, ['简介']);
+  assert.deepEqual(failed.corrections, []);
 
   globalThis.fetch = async () => new Response('not json', { status: 200 });
-  const broken = await reviewTranslations({
-    sources: ['Kubernetes 简介'],
-    translations: ['简介'],
-    config: chatConfig,
-    target: '简体中文',
-    targetCode: 'ZH-HANS',
-    glossary: ['Kubernetes'],
-  });
+  const broken = await reviewTranslations(args);
   assert.equal(broken.review.failed, true);
-  assert.deepEqual(broken.translations, ['简介']);
+  assert.deepEqual(broken.corrections, []);
+
+  globalThis.fetch = async () => new Response('rate limited', { status: 429 });
+  const limited = await reviewTranslations({
+    ...args,
+    retry: { delays: [] },
+  });
+  assert.equal(limited.review.failed, true);
+  assert.deepEqual(limited.corrections, []);
 });
 
-await test('review：index 越界/非法/重复/空条目只替换通过项', async () => {
-  globalThis.fetch = async () =>
-    new Response(
-      chatResult([
-        { index: 999, corrected: '越界' },
-        { index: -1, corrected: '负数' },
-        { index: 0, corrected: 'Kubernetes 简介' },
-        { index: 0, corrected: '重复' },
-        { index: 1, corrected: '' },
-      ]),
-      { status: 200 },
-    );
-
-  const result = await reviewTranslations({
-    sources: ['Kubernetes 简介', 'Kubernetes 部署'],
-    translations: ['简介', '部署'],
-    config: chatConfig,
-    target: '简体中文',
-    targetCode: 'ZH-HANS',
-    glossary: ['Kubernetes'],
-  });
-
-  assert.equal(result.review.failed, false);
-  assert.equal(result.review.reviewed, 2);
-  assert.equal(result.review.corrected, 1);
-  assert.deepEqual(result.translations, ['Kubernetes 简介', '部署'], '只应用第一个有效 index');
-
-  // 没有任何条目不是失败：模型认为都不需要改
+await test('review 请求：模型返回空 segments 不算失败', async () => {
   globalThis.fetch = async () => new Response(chatResult([]), { status: 200 });
   const none = await reviewTranslations({
-    sources: ['Kubernetes 简介'],
-    translations: ['简介'],
+    items: [
+      {
+        id: 'n0',
+        source: 'Kubernetes 简介',
+        primary: '简介',
+        reasons: ['term'],
+        missing: ['Kubernetes'],
+      },
+    ],
     config: chatConfig,
     target: '简体中文',
     targetCode: 'ZH-HANS',
@@ -1211,18 +1313,25 @@ await test('review：index 越界/非法/重复/空条目只替换通过项', as
   });
   assert.equal(none.review.failed, false);
   assert.equal(none.review.corrected, 0);
-  assert.deepEqual(none.translations, ['简介']);
+  assert.deepEqual(none.corrections, []);
 });
 
-await test('review：审校服务配成 MT 时直接失败，不发请求', async () => {
+await test('review 请求：审校服务配成 MT 时直接失败，不发请求', async () => {
   let calls = 0;
   globalThis.fetch = async () => {
     calls += 1;
     return new Response('{}', { status: 200 });
   };
   const result = await reviewTranslations({
-    sources: ['Kubernetes 简介'],
-    translations: ['简介'],
+    items: [
+      {
+        id: 'n0',
+        source: 'Kubernetes 简介',
+        primary: '简介',
+        reasons: ['term'],
+        missing: ['Kubernetes'],
+      },
+    ],
     config: chatDeeplConfig,
     target: '简体中文',
     targetCode: 'ZH-HANS',
@@ -1230,7 +1339,268 @@ await test('review：审校服务配成 MT 时直接失败，不发请求', asyn
   });
   assert.equal(result.review.failed, true);
   assert.equal(calls, 0);
-  assert.deepEqual(result.translations, ['简介']);
+  assert.deepEqual(result.corrections, []);
+});
+
+await test('parseReviewResponse / pageKind / severityOf', async () => {
+  assert.deepEqual(parseReviewResponse('{"segments":[{"index":0,"corrected":"x"},{"index":-1,"corrected":"y"},{"index":"a","corrected":"z"},{"index":2,"corrected":null}]}'), [
+    { index: 0, corrected: 'x' },
+    { index: 2, corrected: '' },
+  ]);
+  assert.deepEqual(parseReviewResponse('{"segments":[]}'), []);
+  assert.deepEqual(parseReviewResponse('{}'), []);
+
+  assert.equal(pageKind('https://en.wikipedia.org/wiki/Linux'), 'wiki');
+  assert.equal(pageKind('https://github.com/a/b/blob/main/x.md'), 'docs');
+  assert.equal(pageKind('https://stackoverflow.com/questions/1'), 'forum');
+  assert.equal(pageKind('https://example.com/page'), 'web');
+
+  assert.ok(severityOf(['empty']) > severityOf(['term']));
+  assert.ok(severityOf(['term']) > severityOf(['length']));
+});
+
+/* ------------------------------ NVIDIA ------------------------------ */
+
+const rivaConfig = {
+  id: 'riva',
+  presetId: 'nvidia-riva',
+  protocol: 'nvidia-riva',
+  baseUrl: 'https://integrate.api.nvidia.com/v1',
+  model: 'nvidia/riva-translate-4b-instruct-v2',
+  apiKey: 'k',
+  sourceLang: 'en',
+};
+
+await test('nvidia-riva：system 只发语言对、一段一请求、不发 response_format', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: String(url), body, headers: init.headers });
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: ' Kubernetes 运行容器。 ' } }] }),
+      { status: 200 },
+    );
+  };
+
+  const out = await getProviderType('nvidia-riva').translate({
+    texts: ['Kubernetes runs containers.', 'Hello world'],
+    config: rivaConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+  });
+
+  assert.deepEqual(out, ['Kubernetes 运行容器。', 'Kubernetes 运行容器。']);
+  assert.equal(calls.length, 2, 'Riva 固定一段一请求');
+  assert.equal(calls[0].url, 'https://integrate.api.nvidia.com/v1/chat/completions');
+  assert.equal(calls[0].body.messages[0].content, 'en-zh-cn');
+  assert.equal(calls[0].body.messages[1].content, 'Kubernetes runs containers.');
+  assert.equal(calls[0].body.response_format, undefined, 'Riva 不承诺 JSON，不能发 response_format');
+  assert.equal(calls[0].body.temperature, 0);
+  assert.equal(calls[0].body.max_tokens, 4096);
+  assert.equal(calls[0].headers.Authorization, 'Bearer k');
+});
+
+await test('rivaPair：语言 id / 代码 / 老值都能拼成语言对', async () => {
+  assert.equal(rivaPair('en', 'ZH-HANS'), 'en-zh-cn');
+  assert.equal(rivaPair('EN-US', 'ZH-HANT'), 'en-zh-tw');
+  assert.equal(rivaPair('zh-Hans', 'EN-US'), 'zh-cn-en');
+  assert.equal(rivaPair('ja', 'KO'), 'ja-ko');
+  assert.equal(rivaPair(undefined, 'ZH-HANS'), 'en-zh-cn');
+  assert.equal(rivaPair('en', 'es'), 'en-es-ES');
+  assert.equal(rivaPair('en', 'pt'), 'en-pt-BR');
+  assert.equal(rivaPair('en', 'xx'), 'en-xx');
+});
+
+await test('nvidia-riva + glossary：不注入、不校验、不回退', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: '', body, headers: init.headers });
+    // 故意丢掉术语：MT 协议不做术语校验
+    return new Response(JSON.stringify({ choices: [{ message: { content: '运行容器' } }] }), {
+      status: 200,
+    });
+  };
+
+  const result = await translateBatch({
+    texts: ['Kubernetes runs containers.'],
+    config: rivaConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+    enforcement: 'fallback',
+  });
+
+  assert.deepEqual(result.translations, ['运行容器']);
+  assert.equal(result.protected, 0);
+  assert.equal(calls[0].body.messages[0].content, 'en-zh-cn', 'system 不能变成术语 prompt');
+});
+
+await test('nvidia：MiniMax 走 OpenAI Chat，{segments} 解析 + reasoning 400 回退', async () => {
+  /** @type {Call[]} */
+  const calls = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: '', body, headers: init.headers });
+    if ('reasoning_effort' in body) {
+      return new Response('{"error":"unsupported reasoning_effort"}', { status: 400 });
+    }
+    const segments = JSON.parse(body.messages[1].content).segments;
+    return new Response(
+      JSON.stringify({
+        choices: [
+          { message: { content: JSON.stringify({ segments: segments.map((s) => `译:${s}`) }) } },
+        ],
+      }),
+      { status: 200 },
+    );
+  };
+
+  const config = {
+    id: 'nvidia',
+    presetId: 'nvidia',
+    protocol: 'openai-chat',
+    baseUrl: 'https://integrate.api.nvidia.com/v1',
+    model: 'minimaxai/minimax-m3.1-flash',
+    apiKey: 'k',
+  };
+  const result = await translateBatch({
+    texts: ['Hello world'],
+    config,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: [],
+    enforcement: 'warn',
+  });
+
+  assert.deepEqual(result.translations, ['译:Hello world']);
+  assert.equal(calls.length, 2, '先发思考字段，400 后只去掉它');
+  assert.equal(calls[0].body.reasoning_effort, 'none');
+  assert.equal(calls[0].body.response_format.type, 'json_object');
+  assert.equal('reasoning_effort' in calls[1].body, false);
+  assert.equal(calls[1].body.response_format.type, 'json_object');
+  assert.equal(reasoningOffParams('nvidia', 'minimaxai/minimax-m3.1-flash').reasoning_effort, 'none');
+});
+
+/* ------------------------------ 调试日志 ------------------------------ */
+
+await test('debug 脱敏：Bearer / apiKey / URL key / session / DeepL 都不能原样出现', async () => {
+  const text = redactText(
+    [
+      'Authorization: Bearer sk-abcdef1234567890',
+      '{"apiKey":"nvapi-abcdefgh12345678"}',
+      'GET https://generativelanguage.googleapis.com/v1/models/x:generateContent?key=AIzaSySECRET123&alt=json',
+      'x-opencode-session: 1234-abcd-5678',
+      'DeepL-Auth-Key 12345678-1234-1234-1234-123456789012:fx',
+      'Ocp-Apim-Subscription-Key: abcdef123456',
+    ].join('\n'),
+  );
+  assert.doesNotMatch(text, /sk-abcdef/);
+  assert.doesNotMatch(text, /nvapi-abcdef/);
+  assert.doesNotMatch(text, /AIzaSySECRET/);
+  assert.doesNotMatch(text, /1234-abcd-5678/);
+  assert.doesNotMatch(text, /12345678-1234-1234/);
+  assert.doesNotMatch(text, /abcdef123456/);
+  assert.match(text, /Bearer \*\*\*/);
+  assert.match(text, /key=\*\*\*/);
+});
+
+await test('debug 条目：时间戳 / 备注 / 数据递归脱敏', async () => {
+  const entry = makeDebugEntry({
+    now: Date.UTC(2026, 9, 23, 12, 34, 56, 789),
+    level: 'info',
+    event: 'user.note',
+    source: 'options',
+    message: '点了翻译',
+    note: '这里开始 429',
+    data: {
+      provider: 'nvidia-riva',
+      apiKey: 'nvapi-secret-value',
+      nested: { authorization: 'Bearer abcdef123456', model: 'riva' },
+      chars: 602,
+    },
+  });
+  assert.equal(entry.v, 1);
+  assert.equal(entry.ts, '2026-10-23T12:34:56.789Z');
+  assert.equal(entry.note, '这里开始 429');
+  assert.equal(entry.source, 'options');
+  assert.equal(entry.data?.apiKey, '***');
+  assert.equal(/** @type {any} */ (entry.data?.nested).authorization, '***');
+  assert.equal(entry.data?.chars, 602);
+  assert.match(formatDebugLine(entry), /^12:34:56 INFO {2}user\.note/);
+});
+
+await test('debug 截断：单条超过 8KB 先丢 data，再截 message', async () => {
+  const huge = makeDebugEntry({
+    event: 'error',
+    message: 'x'.repeat(20000),
+    data: { blob: 'y'.repeat(20000) },
+  });
+  assert.equal(huge.data, undefined);
+  assert.ok(JSON.stringify(huge).length <= 8 * 1024);
+  assert.ok(String(huge.message).length < 1000);
+
+  const small = makeDebugEntry({ event: 'ok', message: 'fine' });
+  assert.deepEqual(truncateEntry(small), small);
+});
+
+await test('debug 环形缓冲：超过 500 条只保留最新', async () => {
+  /** @type {import('../types').DebugLogEntry[]} */
+  let entries = [];
+  for (let index = 0; index < DEBUG_LOG_MAX_ENTRIES + 12; index += 1) {
+    entries = appendDebugEntry(entries, makeDebugEntry({ event: 'tick', message: String(index) }));
+  }
+  assert.equal(entries.length, DEBUG_LOG_MAX_ENTRIES);
+  assert.equal(entries[0].message, '12');
+  assert.equal(entries[entries.length - 1].message, String(DEBUG_LOG_MAX_ENTRIES + 11));
+});
+
+await test('debug 导出：可 JSON.parse、含版本/UA/设置摘要、无密钥与正文', async () => {
+  const settings = {
+    ...normalizeSettings({}),
+    debugLogEnabled: true,
+    debugLogSamples: false,
+    activeProviderId: 'p1',
+    providers: [
+      {
+        id: 'p1',
+        presetId: 'nvidia-riva',
+        protocol: 'nvidia-riva',
+        model: 'nvidia/riva-translate-4b-instruct-v2',
+        apiKey: 'nvapi-do-not-leak',
+        baseUrl: 'https://integrate.api.nvidia.com/v1',
+      },
+    ],
+  };
+  const entries = [makeDebugEntry({ event: 'app.start', source: 'background' })];
+  const payload = buildDebugExport({
+    entries,
+    settings,
+    appVersion: '0.2.0',
+    ua: 'Mozilla/5.0',
+    samples: false,
+    now: Date.UTC(2026, 9, 23),
+  });
+  const text = JSON.stringify(payload);
+  assert.doesNotMatch(text, /nvapi-do-not-leak/);
+  assert.equal(payload.samples, false);
+  assert.equal(payload.appVersion, '0.2.0');
+  assert.equal(/** @type {any} */ (payload.settings).activeProvider.hasKey, true);
+  assert.equal(/** @type {any} */ (payload.settings).activeProvider.model, 'nvidia/riva-translate-4b-instruct-v2');
+  assert.equal(payload.entries.length, 1);
+  assert.doesNotThrow(() => JSON.parse(text));
+
+  const summary = summarizeSettings(settings);
+  assert.equal(summary.providerCount, 1);
+  assert.equal(/** @type {any} */ (summary).debugLogEnabled, true);
+});
+
+await test('debug 样本：最多 120 字且脱敏', () => {
+  const text = sampleText(`${'长'.repeat(200)} key=SECRET123`);
+  assert.ok(text.length <= 121, `样本应截断到 120 字，实际 ${text.length}`);
+  assert.doesNotMatch(text, /SECRET123/);
 });
 
 if (failures > 0) {

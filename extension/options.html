@@ -2,96 +2,271 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>sopen-translate 设置</title>
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
-    <main class="page">
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <main class="page" id="main">
       <header class="page-head">
-        <h1>sopen-translate</h1>
-        <p class="muted">
-          密钥只保存在这台设备的浏览器本地（<code>chrome.storage.local</code>），
-          不上传、不同步、不写日志。
+        <div class="brand-row">
+          <span class="brand-mark" aria-hidden="true">译</span>
+          <div class="brand-text">
+            <h1>sopen-translate</h1>
+            <p class="lede">整页翻译，把网页换成你习惯的语言。</p>
+          </div>
+          <span class="version-pill">v<span id="app-version">—</span></span>
+        </div>
+        <p class="privacy-note">
+          <span class="privacy-text">
+            密钥只保存在这台设备的浏览器里（<code>chrome.storage.local</code>），不上传、不同步、<span class="nowrap">不写日志。</span>
+            <button
+              type="button"
+              class="info-tip"
+              data-tip="到服务商控制台的「API Keys」页面新建一个密钥，粘贴到下面的服务卡片里。扩展只会把密钥发给你填写的接口地址；调试日志导出也只包含「是否已填密钥」，不含密钥本身。"
+              aria-label="密钥存放与获取说明"
+            >
+              <span aria-hidden="true">i</span>
+            </button>
+          </span>
+        </p>
+        <p id="env-warning" class="alert warn env-warning" role="alert">
+          请在扩展环境中打开本页（chrome://extensions → 扩展选项）
         </p>
       </header>
 
-      <section class="card">
+      <section class="card" id="providers-card" aria-labelledby="providers-title">
         <div class="card-head">
-          <h2>翻译服务</h2>
-          <span id="provider-count" class="muted"></span>
+          <div>
+            <p class="kicker">01 · 连接</p>
+            <h2 id="providers-title">翻译服务</h2>
+          </div>
+          <div class="card-head-side">
+            <span id="provider-count" class="muted"></span>
+            <button
+              type="button"
+              class="info-tip"
+              data-tip="页面文本只发给你设为「默认」的服务。开启审校后，可疑段还会发给所选的审校服务。DeepL、微软、Google 与 Riva 没有 prompt 通道，拿不到模型与术语。"
+              aria-label="哪家服务会收到页面文本"
+            >
+              <span aria-hidden="true">i</span>
+            </button>
+          </div>
         </div>
+
         <div id="providers" class="providers"></div>
+
         <div class="add-row">
           <select id="add-preset" class="input" aria-label="要添加的翻译服务"></select>
           <button id="add" class="btn" type="button">添加服务</button>
         </div>
+        <p id="preset-hint" class="hint-line" role="status"></p>
       </section>
 
-      <section class="card">
+      <section class="card" id="language" aria-labelledby="language-title">
         <div class="card-head">
-          <h2>目标语言</h2>
+          <div>
+            <p class="kicker">02 · 方向</p>
+            <h2 id="language-title">目标语言</h2>
+          </div>
         </div>
-        <label class="field">
-          <span>翻译成</span>
+        <div class="field">
+          <div class="field-head">
+            <label for="target-lang">翻译成</label>
+          </div>
           <select id="target-lang" class="input"></select>
-        </label>
+          <p id="target-lang-hint" class="field-hint"></p>
+        </div>
       </section>
 
-      <section class="card">
+      <section class="card" id="glossary" aria-labelledby="glossary-title">
         <div class="card-head">
-          <h2>术语保护</h2>
+          <div>
+            <p class="kicker">03 · 术语</p>
+            <h2 id="glossary-title">术语保护</h2>
+          </div>
           <span id="glossary-meta" class="muted"></span>
         </div>
-        <label class="checkbox">
-          <input id="use-builtin" type="checkbox" />
-          <span>使用内置词库（品牌 / 产品 / 协议名保持原文）</span>
+
+        <label class="switch-row" for="use-builtin">
+          <input id="use-builtin" class="switch-input" type="checkbox" />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span class="switch-text">
+            <span>使用内置词库</span>
+            <span class="muted">品牌、产品与协议名保持原文</span>
+          </span>
         </label>
-        <label class="field">
-          <span>自定义词表：一行一个词，只做“保持原文”</span>
+
+        <div class="field glossary-terms">
+          <div class="field-head">
+            <label for="glossary-terms">自定义词表</label>
+          </div>
           <textarea
             id="glossary-terms"
             class="input"
             rows="6"
             spellcheck="false"
-            placeholder="例如：&#10;Kubernetes&#10;DeepSeek V4.1 Flash"
+            placeholder="一行一个词，例如：&#10;Kubernetes&#10;DeepSeek V4.1 Flash"
           ></textarea>
-        </label>
-        <label class="field">
-          <span>漏词时怎么办</span>
-          <select id="enforcement" class="input">
-            <option value="fallback">fallback</option>
-            <option value="repair">repair</option>
-            <option value="warn">warn</option>
-          </select>
-        </label>
-        <p id="enforcement-help" class="muted"></p>
-        <p class="muted">
-          DeepL、微软翻译与 Google 免费接口没有 prompt 通道，不支持术语保护；配了它们时这一节不生效。
+          <p class="field-hint">一行一个词，只做「保持原文」；空行与大小写重复会自动合并。</p>
+        </div>
+
+        <fieldset class="field enforcement-field">
+          <legend class="field-head">
+            <span>漏词时怎么办</span>
+            <button
+              type="button"
+              class="info-tip"
+              data-tip="保留原文（漏词就整段回退原文，最保守）&#10;自动补翻（只重翻漏词段，仍漏才回退，默认）&#10;只提示（译文照常显示，只提示可能漏词）"
+              aria-label="三档漏词策略的差别"
+            >
+              <span aria-hidden="true">i</span>
+            </button>
+          </legend>
+          <div class="segmented">
+            <label>
+              <input type="radio" name="enforcement" value="fallback" />
+              <span>保留原文</span>
+            </label>
+            <label>
+              <input type="radio" name="enforcement" value="repair" />
+              <span>自动补翻</span>
+            </label>
+            <label>
+              <input type="radio" name="enforcement" value="warn" />
+              <span>只提示</span>
+            </label>
+          </div>
+          <p id="enforcement-help" class="field-hint" aria-live="polite"></p>
+        </fieldset>
+
+        <p class="note">
+          DeepL、微软翻译、Google 免费接口与 NVIDIA Riva 没有 prompt 通道，术语层对它们不生效。
         </p>
       </section>
 
-      <section class="card">
+      <section class="card" id="review" aria-labelledby="review-title">
         <div class="card-head">
-          <h2>审校服务（可选）</h2>
+          <div>
+            <p class="kicker">04 · 兜底</p>
+            <h2 id="review-title">审校服务</h2>
+          </div>
+          <button
+            type="button"
+            class="info-tip"
+            data-tip="审校默认关闭：它会在主译文渲染后额外发一次请求，多花时间与费用（按量计费时）。只处理规则筛出的可疑段，每页最多 200 段 / 8,000 字符；修正不通过校验就保留主译文。"
+            aria-label="审校的开销与限制"
+          >
+            <span aria-hidden="true">i</span>
+          </button>
         </div>
-        <label class="field">
-          <span>主翻译完成后，用另一个 LLM 只修正可疑段</span>
+
+        <div class="field">
+          <div class="field-head">
+            <label for="review-provider">用另一个模型修正可疑段</label>
+          </div>
           <select id="review-provider" class="input"></select>
-        </label>
-        <p class="muted">
-          规则先筛出术语缺失、空译、与原文相同、长度/数字/URL/占位符异常、相邻重复的段，
-          最多送审 200 段 / 8,000 字符；不通过校验的修正会被丢弃，保留主译文。
-        </p>
-        <p class="muted">
-          隐私：页面文本会发给主翻译服务；配置审校后，可疑段还会发给所选的审校服务。
-        </p>
+          <p class="field-hint">默认「不审校」。只对 MT 主翻译生效；LLM 主翻译已走术语注入，不再重复审校。</p>
+        </div>
+
+        <ul class="fact-list">
+          <li>主译文先渲染，审校结果回来后再打补丁，不挡首屏。</li>
+          <li>每次审校是额外请求，会多花时间和（按量计费时的）费用。</li>
+          <li>规则先筛术语缺失、空译、长度或数字异常等可疑段；每页最多 200 段 / 8,000 字符，超出只审前面部分。</li>
+        </ul>
       </section>
 
-      <section class="card">
+      <section class="card" id="debug" aria-labelledby="debug-title" tabindex="-1">
         <div class="card-head">
-          <h2>关于与许可</h2>
+          <div>
+            <p class="kicker">05 · 排障</p>
+            <h2 id="debug-title">调试日志</h2>
+          </div>
+          <span class="muted">只写本机</span>
         </div>
-        <p class="muted">扩展版本：<span id="app-version">—</span></p>
+
+        <div class="toggle-stack">
+          <label class="switch-row" for="debug-enabled">
+            <input id="debug-enabled" class="switch-input" type="checkbox" />
+            <span class="switch-track" aria-hidden="true"></span>
+            <span class="switch-text">
+              <span>启用调试日志</span>
+              <span class="muted">记录翻译批次、重试、审校、还原与错误；默认关闭</span>
+            </span>
+          </label>
+          <label class="switch-row" for="debug-samples">
+            <input id="debug-samples" class="switch-input" type="checkbox" />
+            <span class="switch-track" aria-hidden="true"></span>
+            <span class="switch-text">
+              <span>记录翻译样本</span>
+              <span class="muted">额外记录每段前 120 字原文与译文</span>
+            </span>
+          </label>
+        </div>
+
+        <p class="alert warn">
+          调试日志只写本机 <code>chrome.storage.local</code>，不自动上传。开启「记录翻译样本」后，页面原文与译文会进入日志和导出文件，分享前请自行确认。
+        </p>
+
+        <div class="debug-note-row">
+          <label class="visually-hidden" for="debug-note">备注</label>
+          <input
+            id="debug-note"
+            class="input"
+            type="text"
+            maxlength="300"
+            autocomplete="off"
+            placeholder="写一条备注，例如：这里开始 429"
+          />
+          <button id="debug-note-add" class="btn" type="button">添加备注</button>
+        </div>
+
+        <div class="log-head">
+          <h3>最近 50 条</h3>
+          <span id="debug-count" class="muted"></span>
+        </div>
+        <ul id="debug-list" class="log-list" aria-label="最近的调试日志">
+          <li class="empty">正在读取日志…</li>
+        </ul>
+
+        <div class="debug-actions">
+          <button id="debug-copy" class="btn small" type="button">复制日志</button>
+          <button id="debug-export" class="btn small" type="button">导出 JSON</button>
+          <button id="debug-clear" class="btn small danger" type="button">清空日志</button>
+          <button id="debug-refresh" class="btn small ghost" type="button">刷新</button>
+          <span id="debug-status" class="debug-status" role="status" aria-live="polite"></span>
+        </div>
+      </section>
+
+      <section class="card" id="about" aria-labelledby="about-title">
+        <div class="card-head">
+          <div>
+            <p class="kicker">06 · 说明</p>
+            <h2 id="about-title">关于与许可</h2>
+          </div>
+        </div>
+
+        <dl class="about-facts">
+          <div>
+            <dt>版本</dt>
+            <dd><span id="app-version-about">—</span></dd>
+          </div>
+          <div>
+            <dt>权限</dt>
+            <dd>storage + 所有站点（整页翻译必需）</dd>
+          </div>
+          <div>
+            <dt>联网</dt>
+            <dd>只由后台请求你填写的接口地址</dd>
+          </div>
+          <div>
+            <dt>词库</dt>
+            <dd>随扩展打包，运行时不联网抓取</dd>
+          </div>
+        </dl>
+
         <details class="advanced">
           <summary>第三方数据来源与许可</summary>
           <ul class="licenses">
@@ -102,24 +277,30 @@
               — CC0 1.0；仅提取图标标题作为品牌名候选，并过滤通用词。
             </li>
             <li>
-              <a href="https://models.dev" target="_blank" rel="noreferrer">models.dev</a>
-              — 模型名清单来源（未标注许可证，仅使用名称）；仅提取名称并过滤通用词。
+              <a href="https://github.com/anomalyco/models.dev" target="_blank" rel="noreferrer"
+                >models.dev</a
+              >
+              — MIT License；仅提取模型名称作为候选并过滤通用词。
             </li>
             <li>
               <a href="https://github.com/sogeisetsu/sopen-translate" target="_blank" rel="noreferrer"
                 >sopen-translate</a
               >
-              — 本项目仓库；代码采用 Apache License 2.0，第三方数据见 THIRD-PARTY-NOTICES.md。
+              — 本项目仓库；代码采用 Apache License 2.0，版权与第三方数据声明见 NOTICE。
             </li>
           </ul>
         </details>
       </section>
-
-      <footer class="foot">
-        <button id="save" class="btn primary" type="button">保存设置</button>
-        <span id="save-message" class="muted" role="status"></span>
-      </footer>
     </main>
+
+    <div class="save-bar" id="save-bar" data-state="idle">
+      <div class="save-bar-inner">
+        <p class="save-state" id="save-message" role="status" aria-live="polite">
+          正在读取设置…
+        </p>
+        <button id="save" class="btn primary" type="button" title="Ctrl / ⌘ + S">保存设置</button>
+      </div>
+    </div>
 
     <script type="module" src="options.js"></script>
   </body>

@@ -55,6 +55,9 @@ const RULES = [
   { preset: 'minimax', match: /^minimax-m3\.1-flash/i, params: null },
   { preset: 'minimax', match: /.*/, params: { thinking: { type: 'disabled' } } },
 
+  // --- NVIDIA NIM：MiniMax M3.1 Flash 实测接受 none（900ms，{segments} + response_format 正常）---
+  { preset: 'nvidia', match: /^minimaxai\/minimax-m3\.1-flash/i, params: { reasoning_effort: 'none' } },
+
   // --- OpenRouter 统一开关 ---
   { preset: 'openrouter', match: /.*/, params: { reasoning: { enabled: false } } },
 

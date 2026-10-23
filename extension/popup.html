@@ -2,34 +2,103 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>sopen-translate</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <header class="head">
-      <strong class="brand">sopen-translate</strong>
-      <span id="provider" class="muted">读取中…</span>
+      <span class="mark" aria-hidden="true">译</span>
+      <div class="head-text">
+        <h1 class="wordmark">sopen-translate</h1>
+        <p class="head-meta">
+          <span id="provider" class="head-provider">读取中…</span>
+          <span class="head-arrow" aria-hidden="true">→</span>
+          <span id="target" class="head-target">—</span>
+        </p>
+      </div>
+      <span id="debug-badge" class="badge warn head-badge" title="调试日志已开启" hidden>调试中</span>
     </header>
 
-    <button id="main" class="round" type="button" aria-label="翻译此页">翻译</button>
+    <section class="action-block">
+      <button id="main" class="action" type="button" data-state="idle">
+        <span id="main-label" class="action-label">翻译</span>
+        <span id="main-count" class="action-count" hidden></span>
+        <span id="main-progress" class="action-progress" aria-hidden="true"></span>
+      </button>
 
-    <div class="mode" role="group" aria-label="展示模式">
-      <button type="button" data-mode="translation" aria-pressed="true">纯译文</button>
-      <button type="button" data-mode="bilingual" aria-pressed="false">双语</button>
-    </div>
+      <div class="status-block" role="status" aria-live="polite">
+        <p id="status" class="status"></p>
+        <p id="review-status" class="status status-review" hidden>
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="review-status-text" class="status-review-text"></span>
+          <span id="review-status-flag" class="status-flag" hidden></span>
+        </p>
+      </div>
+    </section>
 
-    <div class="mode" role="group" aria-label="翻译范围">
-      <button type="button" data-scope="viewport" aria-pressed="true">视口优先</button>
-      <button type="button" data-scope="whole" aria-pressed="false">整页</button>
-    </div>
+    <section class="controls" aria-label="翻译设置">
+      <div class="row">
+        <span id="mode-label" class="row-label">展示</span>
+        <div id="mode-group" class="segmented" role="radiogroup" aria-labelledby="mode-label">
+          <label>
+            <input type="radio" name="display-mode" value="translation" />
+            <span>纯译文</span>
+          </label>
+          <label>
+            <input type="radio" name="display-mode" value="bilingual" />
+            <span>双语</span>
+          </label>
+        </div>
+      </div>
 
-    <select id="target-lang" class="input" aria-label="目标语言"></select>
+      <div class="row">
+        <span id="scope-label" class="row-label">范围</span>
+        <div id="scope-group" class="segmented" role="radiogroup" aria-labelledby="scope-label">
+          <label>
+            <input type="radio" name="translate-scope" value="viewport" />
+            <span>视口优先</span>
+          </label>
+          <label>
+            <input type="radio" name="translate-scope" value="whole" />
+            <span>整页</span>
+          </label>
+        </div>
+      </div>
 
-    <p id="message" class="muted" role="status"></p>
+      <div class="row">
+        <label class="row-label" for="target-lang">译成</label>
+        <select id="target-lang" class="input lang"></select>
+      </div>
+    </section>
+
+    <button
+      id="review-toggle"
+      class="review-toggle"
+      type="button"
+      aria-expanded="false"
+      aria-controls="review-panel"
+      hidden
+    >
+      <span class="review-toggle-label">审校详情</span>
+      <span id="review-meta" class="review-toggle-meta"></span>
+      <span class="chevron" aria-hidden="true"></span>
+    </button>
+
+    <section id="review-panel" class="review-panel" aria-label="审校详情" hidden>
+      <div id="review-summary" class="review-summary"></div>
+      <ol id="review-list" class="review-list"></ol>
+      <p id="review-more" class="review-more" hidden></p>
+      <div class="review-foot">
+        <button id="review-undo" class="btn small" type="button" disabled>撤销本次审校</button>
+        <span id="review-undo-status" class="note" role="status" aria-live="polite"></span>
+      </div>
+      <p class="review-note">只影响本次翻译；还原页面后清空，不写入任何存储。</p>
+    </section>
 
     <footer class="foot">
-      <a id="open-options" href="#">设置</a>
-      <span id="target" class="muted"></span>
+      <a id="open-options" href="options.html">设置</a>
+      <a id="open-debug" href="options.html#debug">调试日志</a>
     </footer>
 
     <script type="module" src="popup.js"></script>

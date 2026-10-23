@@ -34,6 +34,8 @@ export const DEFAULT_SETTINGS = {
   enforcement: 'repair',
   glossary: DEFAULT_GLOSSARY,
   reviewProviderId: null,
+  debugLogEnabled: false,
+  debugLogSamples: false,
   sessionId: '',
 };
 
@@ -94,6 +96,8 @@ export function normalizeSettings(stored) {
       typeof raw.reviewProviderId === 'string' && raw.reviewProviderId
         ? raw.reviewProviderId
         : null,
+    debugLogEnabled: raw.debugLogEnabled === true,
+    debugLogSamples: raw.debugLogSamples === true,
     glossary,
     sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : '',
     providers,

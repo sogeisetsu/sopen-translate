@@ -12,10 +12,19 @@ import {
   patchProvider,
 } from './lib/settings.js';
 import { getPreset } from './lib/provider-presets.js';
+import { getProtocol } from './lib/protocols.js';
 import { loadModelList, resolveModelsUrl } from './lib/models.js';
-import { normalizeTerms } from './lib/glossary.js';
+import { compileGlossary, normalizeTerms } from './lib/glossary.js';
 import { reviewTranslations, translateBatch } from './lib/providers.js';
-import { REVIEW_MAX_CHARS, REVIEW_MAX_SEGMENTS } from './lib/review.js';
+import {
+  REVIEW_MAX_CHARS,
+  REVIEW_MAX_SEGMENTS,
+  findSuspicious,
+  hostOf,
+  pageKind,
+  selectReviewItems,
+} from './lib/review.js';
+import { appendDebugEntry, makeDebugEntry, sampleText } from './lib/debug-log.js';
 
 /** @typedef {import('../types').ProviderConfig} ProviderConfig */
 /** @typedef {import('../types').Settings} Settings */
@@ -55,36 +64,181 @@ function reviewBudget(token) {
   return budget;
 }
 
+/* ------------------------------- 调试日志 ------------------------------- */
+
+/** 开启状态缓存：避免每条日志都读一次 settings；设置一变就清空 */
+/** @type {boolean | null} */
+let debugEnabledCache = null;
+/** 串行写盘：多个 context 同时 debug.log 时不能互相覆盖 */
+let debugWriteQueue = Promise.resolve();
+
+/**
+ * @param {unknown} err
+ * @returns {Record<string, unknown>}
+ */
+function errorData(err) {
+  const anyError = /** @type {{ status?: unknown, name?: unknown, message?: unknown }} */ (err);
+  const message = String(anyError?.message ?? err);
+  const host = message.match(/https?:\/\/([^/\s:]+)/)?.[1];
+  return {
+    name: String(anyError?.name ?? 'Error'),
+    ...(Number.isInteger(anyError?.status) ? { status: anyError.status } : {}),
+    ...(host ? { host } : {}),
+  };
+}
+
+/**
+ * 写一条调试日志。关闭时是零写入；任何异常都吞掉，不能影响翻译。
+ * @param {Record<string, any>} input
+ * @param {chrome.runtime.MessageSender} [sender]
+ * @returns {Promise<{ ok: boolean, skipped?: boolean }>}
+ */
+async function logDebug(input, sender) {
+  try {
+    const settings = await getSettings();
+    if (!settings.debugLogEnabled) return { ok: true, skipped: true };
+
+    /** @type {Record<string, any>} */
+    const payload = { ...input };
+    const tab = sender?.tab;
+    if (Number.isInteger(tab?.id)) payload.tabId = tab?.id;
+    if (tab?.url && !payload.url) payload.url = tab.url;
+    if (payload.sample) {
+      const sample = payload.sample;
+      delete payload.sample;
+      // 只有显式开启 samples 才把页面文本写进日志
+      if (settings.debugLogSamples) {
+        payload.data = {
+          ...(payload.data || {}),
+          sample: {
+            source: sampleText(sample.source),
+            primary: sampleText(sample.primary),
+          },
+        };
+      }
+    }
+
+    const entry = makeDebugEntry(payload);
+    const task = debugWriteQueue.then(async () => {
+      const stored = await chrome.storage.local.get('debugLog');
+      const entries = appendDebugEntry(
+        Array.isArray(stored.debugLog)
+          ? /** @type {import('../types').DebugLogEntry[]} */ (stored.debugLog)
+          : [],
+        entry,
+      );
+      await chrome.storage.local.set({ debugLog: entries });
+    });
+    debugWriteQueue = task.catch(() => {});
+    await task;
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * @param {unknown} limit
+ */
+async function getDebugLog(limit) {
+  const settings = await getSettings();
+  const stored = await chrome.storage.local.get('debugLog');
+  const entries = Array.isArray(stored.debugLog) ? stored.debugLog : [];
+  const max =
+    Number.isInteger(limit) && Number(limit) > 0
+      ? Math.min(Number(limit), entries.length)
+      : entries.length;
+  return {
+    ok: true,
+    enabled: settings.debugLogEnabled,
+    samples: settings.debugLogSamples,
+    entries: entries.slice(-max),
+  };
+}
+
+async function clearDebugLog() {
+  await chrome.storage.local.set({ debugLog: [] });
+  return { ok: true };
+}
+
+/** @param {unknown} err */
+function markLogged(err) {
+  if (err && typeof err === 'object') {
+    try {
+      /** @type {Record<string, unknown>} */ (err).__logged = true;
+    } catch {
+      /* 冻结对象等忽略 */
+    }
+  }
+}
+
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  void logDebug({
+    level: 'info',
+    event: 'app.start',
+    source: 'background',
+    message: `onInstalled:${reason}`,
+  });
   if (reason !== 'install') return;
   const settings = await getSettings();
   if (settings.providers.length === 0) chrome.runtime.openOptionsPage();
 });
 
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.settings) glossaryCache = null;
+chrome.runtime.onStartup.addListener(() => {
+  void logDebug({
+    level: 'info',
+    event: 'app.start',
+    source: 'background',
+    message: 'onStartup',
+  });
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  const task = route(message);
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes.settings) {
+    glossaryCache = null;
+    debugEnabledCache = null;
+  }
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const task = route(message, sender);
   if (!task) return false;
-  task.then(sendResponse, (err) =>
-    sendResponse({ ok: false, error: err?.message || String(err) }),
-  );
+  task.then(sendResponse, (err) => {
+    // 统一记一次错误；不记录请求头/响应体
+    if (!/** @type {any} */ (err)?.__logged) {
+      void logDebug({
+        level: 'error',
+        event: 'error',
+        source: 'background',
+        message: err?.message || String(err),
+        data: errorData(err),
+      });
+    }
+    sendResponse({ ok: false, error: err?.message || String(err) });
+  });
   return true; // 保持通道等异步结果
 });
 
 /** 只处理自己认识的消息，其余交回给别的监听者 */
-function route(message) {
+function route(message, sender) {
   switch (message?.type) {
     case 'translate':
       return translate(message.texts, message.pageToken);
+    case 'review.run':
+      return runReview(message);
     case 'testProvider':
       return testProvider(message.config, message.sample);
     case 'status':
       return status();
     case 'models.list':
       return listModels(message.provider);
+    case 'debug.log':
+      return logDebug(message, sender);
+    case 'debug.get':
+      return getDebugLog(message?.limit);
+    case 'debug.clear':
+      return clearDebugLog();
     default:
       return null;
   }
@@ -171,51 +325,164 @@ async function translate(texts, pageToken) {
     extraHeaders,
   });
 
-  // 可选审校层：主译文不动，只让第二个 LLM 修正规则筛出的可疑段。
-  let translations = result.translations;
-  /** @type {import('../types').ReviewOutcome | undefined} */
-  let review;
+  // 审校已改为异步：这里只做纯 CPU 规则筛选，把可疑段随主译文一起返回。
+  // LLM 主翻译已走术语注入 + repair，不再重复审校（MT-only 门禁）。
   const reviewProvider = settings.reviewProviderId
     ? settings.providers.find((p) => p.id === settings.reviewProviderId)
     : null;
-  if (reviewProvider) {
-    const token = typeof pageToken === 'string' && pageToken ? pageToken : 'default';
-    const budget = reviewBudget(token);
-    const remainingSegments = Math.max(0, REVIEW_MAX_SEGMENTS - budget.segments);
-    const remainingChars = Math.max(0, REVIEW_MAX_CHARS - budget.chars);
 
-    if (remainingSegments === 0 || remainingChars === 0) {
-      // 本页审校预算用完：主译文照常返回，不再送审
-      review = { reviewed: 0, corrected: 0, failed: false, truncated: true };
-    } else {
-      const reviewed = await reviewTranslations({
+  /** @type {import('../types').ReviewCandidate[]} */
+  let reviewCandidates = [];
+  /** @type {string | undefined} */
+  let reviewSkipped;
+  if (reviewProvider) {
+    const primaryProtocol = getProtocol(provider.protocol);
+    if (primaryProtocol.supportsGlossary !== false) {
+      reviewSkipped = 'llm-primary';
+    } else if (getProtocol(reviewProvider.protocol).supportsGlossary !== false) {
+      const compiled = compileGlossary(glossary);
+      reviewCandidates = findSuspicious({
         sources: list,
-        translations,
-        config: reviewProvider,
-        target: settings.targetLang,
+        translations: result.translations,
+        compiled,
         targetCode: settings.targetLangCode,
-        glossary,
-        extraHeaders: await sessionHeaders(reviewProvider),
-        maxSegments: remainingSegments,
-        maxChars: remainingChars,
-      });
-      translations = reviewed.translations;
-      review = reviewed.review;
-      budget.segments += reviewed.review.reviewed;
-      budget.chars += reviewed.usedChars;
-      budget.at = Date.now();
+      }).items;
     }
+    // 审校服务本身是 MT：选项页已过滤，这里直接不给候选，也不发请求
   }
+
+  /** @type {Record<string, any>} */
+  const response = {
+    ok: true,
+    translations: result.translations,
+    protected: result.protected,
+    warnings: result.warnings,
+  };
+  if (reviewProvider) {
+    response.reviewCandidates = reviewCandidates;
+    if (reviewSkipped) response.reviewSkipped = reviewSkipped;
+  }
+  return response;
+}
+
+/**
+ * content 在主译文渲染后主动发起审校；预算按 pageToken 累计。
+ * @param {any} message
+ */
+async function runReview(message) {
+  const settings = await getSettings();
+  const reviewProvider = settings.reviewProviderId
+    ? settings.providers.find((p) => p.id === settings.reviewProviderId)
+    : null;
+  if (!reviewProvider) return { ok: false, error: '没有配置审校服务' };
+
+  const items = sanitizeReviewItems(message?.items);
+  /** @type {import('../types').ReviewRunResult} */
+  const base = { reviewed: 0, corrected: 0, failed: false, truncated: false };
+  if (items.length === 0) {
+    return { ok: true, corrections: [], rejected: [], review: base };
+  }
+
+  const token =
+    typeof message.pageToken === 'string' && message.pageToken ? message.pageToken : 'default';
+  const budget = reviewBudget(token);
+  const remainingSegments = Math.max(0, REVIEW_MAX_SEGMENTS - budget.segments);
+  const remainingChars = Math.max(0, REVIEW_MAX_CHARS - budget.chars);
+  if (remainingSegments === 0 || remainingChars === 0) {
+    return { ok: true, corrections: [], rejected: [], review: { ...base, truncated: true } };
+  }
+
+  // 预算按「原文 + 主译文」字符数算，避免一大段把整页预算吃光
+  const selected = selectReviewItems(items, {
+    maxSegments: remainingSegments,
+    maxChars: remainingChars,
+  });
+  const picked = selected.items;
+  const truncated = selected.truncated;
+  if (picked.length === 0) {
+    return { ok: true, corrections: [], rejected: [], review: { ...base, truncated: true } };
+  }
+
+  const glossary = await getGlossaryTerms(settings);
+  const url = String(message?.context?.url ?? '');
+  void logDebug({
+    level: 'info',
+    event: 'review.start',
+    source: 'background',
+    message: `${picked.length} 段`,
+    data: { items: picked.length, host: hostOf(url), truncated },
+  });
+  const reviewed = await reviewTranslations({
+    items: picked,
+    config: reviewProvider,
+    target:
+      typeof message?.target === 'string' && message.target
+        ? message.target
+        : settings.targetLang,
+    targetCode:
+      typeof message?.targetCode === 'string' && message.targetCode
+        ? message.targetCode
+        : settings.targetLangCode,
+    context: {
+      title: String(message?.context?.title ?? ''),
+      host: hostOf(url),
+      kind: pageKind(url),
+    },
+    glossary,
+    extraHeaders: await sessionHeaders(reviewProvider),
+  });
+
+  budget.segments += reviewed.review.reviewed;
+  budget.chars += reviewed.usedChars;
+  budget.at = Date.now();
+
+  void logDebug({
+    level: reviewed.review.failed ? 'warn' : 'info',
+    event: reviewed.review.failed ? 'review.failed' : 'review.end',
+    source: 'background',
+    message: reviewed.review.failed ? '审校失败，保留主译文' : 'ok',
+    data: {
+      reviewed: reviewed.review.reviewed,
+      corrected: reviewed.review.corrected,
+      rejected: reviewed.rejected.length,
+      truncated: reviewed.review.truncated || truncated,
+      chars: reviewed.usedChars,
+    },
+  });
 
   return {
     ok: true,
-    translations,
-    protected: result.protected,
-    warnings: result.warnings,
-    review,
-    reviewFailed: review ? review.failed : false,
-    reviewTruncated: review ? review.truncated : false,
+    corrections: reviewed.corrections,
+    rejected: reviewed.rejected,
+    review: { ...reviewed.review, truncated: reviewed.review.truncated || truncated },
   };
+}
+
+/**
+ * 只接受结构正确的送审项；content 是唯一来源，但消息通道不能假设输入可信。
+ * @param {any} items
+ * @returns {import('../types').ReviewRunItem[]}
+ */
+function sanitizeReviewItems(items) {
+  if (!Array.isArray(items)) return [];
+  /** @type {import('../types').ReviewRunItem[]} */
+  const out = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const id = String(item.id ?? '').trim();
+    const source = String(item.source ?? '');
+    if (!id || !source.trim()) continue;
+    out.push({
+      id,
+      source,
+      primary: String(item.primary ?? ''),
+      reasons: Array.isArray(item.reasons) ? item.reasons.map(String).slice(0, 8) : [],
+      missing: Array.isArray(item.missing) ? item.missing.map(String).slice(0, 20) : [],
+      ...(item.prev ? { prev: String(item.prev).slice(0, 200) } : {}),
+      ...(item.next ? { next: String(item.next).slice(0, 200) } : {}),
+    });
+  }
+  return out;
 }
 
 /**
@@ -231,14 +498,47 @@ async function testProvider(config, sample) {
   const extraHeaders = await sessionHeaders(config);
 
   const started = Date.now();
-  const result = await translateBatch({
-    texts,
-    config,
-    target: settings.targetLang,
-    targetCode: settings.targetLangCode,
-    glossary: [],
-    enforcement: 'warn',
-    extraHeaders,
+  /** @type {import('../types').TranslateBatchResult} */
+  let result;
+  try {
+    result = await translateBatch({
+      texts,
+      config,
+      target: settings.targetLang,
+      targetCode: settings.targetLangCode,
+      glossary: [],
+      enforcement: 'warn',
+      extraHeaders,
+    });
+  } catch (err) {
+    markLogged(err);
+    void logDebug({
+      level: 'error',
+      event: 'provider.test',
+      source: 'background',
+      message: String(/** @type {any} */ (err)?.message ?? err),
+      data: {
+        ...errorData(err),
+        presetId: config.presetId,
+        protocol: config.protocol,
+        model: config.model,
+        elapsed: Date.now() - started,
+      },
+    });
+    throw err;
+  }
+
+  void logDebug({
+    level: 'info',
+    event: 'provider.test',
+    source: 'background',
+    message: 'ok',
+    data: {
+      presetId: config.presetId,
+      protocol: config.protocol,
+      model: config.model,
+      elapsed: Date.now() - started,
+    },
   });
 
   return {

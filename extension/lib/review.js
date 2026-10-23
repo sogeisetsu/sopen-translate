@@ -4,11 +4,13 @@
  *
  * 设计取舍：
  * - 只筛可疑段，绝不把整页重发一遍（全量审校会把 LLM 吞吐瓶颈请回来）；
- * - 修正结果按**顺序**对齐回可疑段，不依赖模型返回的 index：
- *   模型改号 / 漏项时顺序对齐比信任 index 更安全；
- * - 任何校验不过的修正都丢弃，保留主译文。
+ * - 可疑段按“严重度”排序后再吃预算：预算不够时先保住空译 / 同原文 / 漏术语，
+ *   而不是页面最前面几条无关紧要的长度异常；
+ * - 修正结果按校验通过与否过滤，任何一项校验不过都丢弃，保留主译文。
  *
  * @typedef {import('../../types').ReviewItem} ReviewItem
+ * @typedef {import('../../types').ReviewCorrection} ReviewCorrection
+ * @typedef {import('../../types').ReviewOutcome} ReviewOutcome
  */
 
 import { verifySegment } from './glossary.js';
@@ -90,7 +92,82 @@ function lengthRange(script) {
 }
 
 /**
+ * 修正后的长度比校验要更宽松：允许多加几个字解释，但不接受整段增删。
+ * @param {string | null} script
+ * @returns {{ min: number, max: number }}
+ */
+function looseLengthRange(script) {
+  return script === 'han' || script === 'japanese' || script === 'hangul'
+    ? { min: 0.08, max: 6 }
+    : { min: 0.2, max: 5 };
+}
+
+/** 规则严重度：预算不够时先审“一定读不通”的段 */
+const REASON_SEVERITY = {
+  empty: 100,
+  same: 90,
+  term: 80,
+  numbers: 60,
+  url: 60,
+  placeholder: 60,
+  script: 50,
+  length: 30,
+  duplicate: 20,
+};
+
+/**
+ * 一条可疑段的严重度（取最高权重）。
+ * @param {string[]} reasons
+ * @returns {number}
+ */
+export function severityOf(reasons) {
+  let score = 0;
+  for (const reason of reasons) {
+    const weight = REASON_SEVERITY[reason] ?? 10;
+    if (weight > score) score = weight;
+  }
+  return score;
+}
+
+/** @param {string} text @returns {number} 原文里的 HTML 标签数（修正不能增删标签） */
+function countHtmlTags(text) {
+  return (String(text ?? '').match(/<[a-zA-Z][^>]*>/g) || []).length;
+}
+
+/**
+ * 页面类型：只用于给审校模型一句语境，不参与校验。
+ * @param {string | undefined | null} url
+ * @returns {'wiki' | 'forum' | 'docs' | 'web'}
+ */
+export function pageKind(url) {
+  const raw = String(url ?? '').toLowerCase();
+  if (!raw) return 'web';
+  if (/wikipedia\.org|wiki\/|wiki\./.test(raw)) return 'wiki';
+  if (/forum|discourse|stackexchange|stackoverflow|reddit\.com|\/thread|\/t\//.test(raw)) {
+    return 'forum';
+  }
+  if (/\/docs?\/|readthedocs|developer\.|doc\.|\/manual|\/reference|github\.com\/[^/]+\/[^/]+\/(blob|tree)/.test(raw)) {
+    return 'docs';
+  }
+  return 'web';
+}
+
+/**
+ * 只把域名发给模型：完整 URL 可能带 query（含 key），而且没必要。
+ * @param {string | undefined | null} url
+ * @returns {string}
+ */
+export function hostOf(url) {
+  try {
+    return new URL(String(url ?? '')).host;
+  } catch {
+    return '';
+  }
+}
+
+/**
  * 确定性筛可疑段。只返回有理由的项。
+ * 超出预算时按严重度优先保留，输出再按文档顺序排，方便日志对照。
  * @param {Object} args
  * @param {string[]} args.sources
  * @param {string[]} args.translations
@@ -110,10 +187,8 @@ export function findSuspicious({
 }) {
   const script = targetScript(targetCode);
   const range = lengthRange(script);
-  /** @type {ReviewItem[]} */
-  const items = [];
-  let chars = 0;
-  let truncated = false;
+  /** @type {{ index: number, reasons: string[], missing: string[], cost: number }[]} */
+  const candidates = [];
 
   const total = Math.max(sources.length, translations.length);
   for (let index = 0; index < total; index += 1) {
@@ -163,57 +238,121 @@ export function findSuspicious({
 
     if (reasons.length === 0) continue;
 
-    const cost = source.length + translated.length;
-    if (items.length >= maxSegments || chars + cost > maxChars) {
+    candidates.push({
+      index,
+      reasons,
+      missing: [...new Set(missing)],
+      cost: source.length + translated.length,
+    });
+  }
+
+  candidates.sort(
+    (left, right) =>
+      severityOf(right.reasons) - severityOf(left.reasons) || left.index - right.index,
+  );
+
+  /** @type {ReviewItem[]} */
+  const items = [];
+  let chars = 0;
+  let truncated = false;
+  for (const candidate of candidates) {
+    if (items.length >= maxSegments || chars + candidate.cost > maxChars) {
+      truncated = true;
+      continue;
+    }
+    chars += candidate.cost;
+    items.push({ index: candidate.index, reasons: candidate.reasons, missing: candidate.missing });
+  }
+
+  items.sort((left, right) => left.index - right.index);
+  return { items, truncated };
+}
+
+/**
+ * 按页预算裁剪送审项。预算是「原文 + 主译文」字符数，避免一大段把整页预算吃光。
+ * 超出预算的条目不送审，由调用方把 truncated 标记带回 content。
+ * @param {import('../../types').ReviewRunItem[]} items
+ * @param {{ maxSegments?: number, maxChars?: number }} [limits]
+ * @returns {{ items: import('../../types').ReviewRunItem[], truncated: boolean }}
+ */
+export function selectReviewItems(
+  items,
+  { maxSegments = REVIEW_MAX_SEGMENTS, maxChars = REVIEW_MAX_CHARS } = {},
+) {
+  /** @type {import('../../types').ReviewRunItem[]} */
+  const picked = [];
+  let chars = 0;
+  let truncated = false;
+  for (const item of items) {
+    const cost = String(item.source ?? '').length + String(item.primary ?? '').length;
+    if (picked.length >= maxSegments || chars + cost > maxChars) {
       truncated = true;
       continue;
     }
     chars += cost;
-    items.push({ index, reasons, missing: [...new Set(missing)] });
+    picked.push(item);
   }
-
-  return { items, truncated };
+  return { items: picked, truncated };
 }
 
 /**
  * 审校 system prompt。必须保留 "JSON" 字样：
  * `deepseek-v4.1-flash` 的 `response_format` 会检查 prompt 里是否出现 json。
  * @param {string} target
+ * @param {{ title?: string, host?: string, kind?: string }} [page]
  * @returns {string}
  */
-export function buildReviewSystemPrompt(target) {
+export function buildReviewSystemPrompt(target, page = {}) {
+  const contextLine =
+    page.title || page.host || page.kind
+      ? `语境：页面标题「${page.title || '未知'}」，域名 ${page.host || '未知'}，页面类型 ${
+          page.kind || 'web'
+        }。语境只用于判断术语和语气，不要翻译它。`
+      : '';
   return [
     `你是翻译审校器。目标语言是「${target}」。`,
-    '输入是 JSON：segments 是待检查片段数组，每项含 index / source / primary / reasons / missing。',
+    contextLine,
+    '输入是 JSON：segments 是待检查片段数组，每项含 index / source / primary / reasons / missing；可选的 prev / next 是相邻段，仅供理解语境。',
     '逐项检查 primary 译文：',
     '- 只修正确实有问题的译文；没有问题就跳过，不要润色、不要改语气。',
     '- 必须保留 source 中的专有名词、品牌名、型号、代码、URL、数字和占位符。',
-    '- 不要合并、拆分、增删片段。',
+    '- 保留 source 里的 HTML 标签数量与位置，不要合并、拆分、增删片段。',
     '只输出 JSON：{"segments":[{"index":3,"corrected":"修正后的译文"}]}。',
     '- 只返回需要修正的片段，index 必须与输入中的 index 一致；corrected 必须是字符串且非空。',
     '- 不要输出解释，不要返回没有问题的片段。',
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 /**
  * @param {Object} args
  * @param {string} args.target
- * @param {ReviewItem[]} args.items
- * @param {string[]} args.sources
- * @param {string[]} args.translations
+ * @param {import('../../types').ReviewRunItem[]} args.items
+ * @param {{ title?: string, host?: string, kind?: string }} [args.context]
  * @returns {{ system: string, userContent: string }}
  */
-export function buildReviewRequest({ target, items, sources, translations }) {
-  const segments = items.map((item) => ({
-    index: item.index,
-    source: sources[item.index] ?? '',
-    primary: translations[item.index] ?? '',
-    reasons: item.reasons,
-    missing: item.missing,
+export function buildReviewRequest({ target, items, context }) {
+  /** @type {{ title?: string, host?: string, kind?: string }} */
+  const page = {};
+  if (context?.title) page.title = String(context.title).slice(0, 120);
+  if (context?.host) page.host = context.host;
+  if (context?.kind) page.kind = context.kind;
+  const hasPage = Object.keys(page).length > 0;
+
+  const segments = items.map((item, index) => ({
+    index,
+    source: String(item.source ?? ''),
+    primary: String(item.primary ?? ''),
+    reasons: Array.isArray(item.reasons) ? item.reasons : [],
+    missing: Array.isArray(item.missing) ? item.missing : [],
+    ...(item.prev ? { prev: String(item.prev).slice(0, 200) } : {}),
+    ...(item.next ? { next: String(item.next).slice(0, 200) } : {}),
   }));
+
   return {
-    system: buildReviewSystemPrompt(target),
-    userContent: JSON.stringify({ segments }),
+    system: buildReviewSystemPrompt(target, page),
+    userContent: JSON.stringify(hasPage ? { page, segments } : { segments }),
   };
 }
 
@@ -241,47 +380,101 @@ export function parseReviewResponse(content) {
 
 /**
  * 只替换 index 在可疑段集合内、corrected 非空且校验通过的条目。
- * 重复 index 只取第一次有效修正。
+ * 重复 index 只取第一次有效修正；被丢弃的条目带原因返回，供 diff 展示。
  * @param {Object} args
  * @param {string[]} args.sources
  * @param {string[]} args.translations
  * @param {ReviewItem[]} args.items
- * @param {import('../../types').ReviewCorrection[]} args.corrections
+ * @param {ReviewCorrection[]} args.corrections
  * @param {ReturnType<typeof import('./glossary.js').compileGlossary>} args.compiled
- * @returns {{ translations: string[], corrected: number }}
+ * @param {string} [args.targetCode]
+ * @returns {{ translations: string[], corrected: number, rejected: { index: number, reason: string }[] }}
  */
-export function applyReviewCorrections({ sources, translations, items, corrections, compiled }) {
+export function applyReviewCorrections({
+  sources,
+  translations,
+  items,
+  corrections,
+  compiled,
+  targetCode = '',
+}) {
   const next = translations.slice();
   const byIndex = new Map(items.map((item) => [item.index, item]));
-  const applied = new Set();
+  const seen = new Set();
+  /** @type {{ index: number, reason: string }[]} */
+  const rejected = [];
+  const script = targetScript(targetCode);
+  const range = looseLengthRange(script);
   let count = 0;
 
   for (const correction of corrections) {
     const item = byIndex.get(correction.index);
-    if (!item || applied.has(correction.index)) continue;
+    if (!item) continue; // 不属于送审集合：静默丢弃
+    if (seen.has(correction.index)) {
+      rejected.push({ index: correction.index, reason: 'duplicate' });
+      continue;
+    }
+    seen.add(correction.index);
 
     const text = String(correction.corrected ?? '').trim();
-    if (!text) continue;
+    if (!text) {
+      rejected.push({ index: correction.index, reason: 'empty' });
+      continue;
+    }
 
     const source = String(sources[item.index] ?? '');
     const primary = String(translations[item.index] ?? '').trim();
-    if (text === primary) continue;
+    if (text === primary) {
+      rejected.push({ index: correction.index, reason: 'same-primary' });
+      continue;
+    }
     // 没有术语缺失时，“修正”成原文等于没翻；有术语缺失时保留原文是合法的保护手段
-    if (text === source.trim() && item.missing.length === 0) continue;
-    // 修正不能丢掉原文里的数字 / URL / 占位符
-    if (countNumbers(text) !== countNumbers(source)) continue;
-    if (countUrls(text) !== countUrls(source)) continue;
-    if (countPlaceholders(text) !== countPlaceholders(source)) continue;
+    if (text === source.trim() && item.missing.length === 0) {
+      rejected.push({ index: correction.index, reason: 'same-source' });
+      continue;
+    }
+    // 修正不能丢掉原文里的数字 / URL / 占位符 / HTML 标签
+    if (countNumbers(text) !== countNumbers(source)) {
+      rejected.push({ index: correction.index, reason: 'numbers' });
+      continue;
+    }
+    if (countUrls(text) !== countUrls(source)) {
+      rejected.push({ index: correction.index, reason: 'url' });
+      continue;
+    }
+    if (countPlaceholders(text) !== countPlaceholders(source)) {
+      rejected.push({ index: correction.index, reason: 'placeholder' });
+      continue;
+    }
+    if (countHtmlTags(text) !== countHtmlTags(source)) {
+      rejected.push({ index: correction.index, reason: 'html' });
+      continue;
+    }
+    // 目标脚本必须出现：中文目标语言却返回纯英文，不算修正
+    if (script && /[\p{L}]/u.test(text) && !hasScript(text, script)) {
+      rejected.push({ index: correction.index, reason: 'script' });
+      continue;
+    }
+    // 长度比只要在宽松范围内就接受；超出说明整段被增删
+    if (source.trim()) {
+      const ratio = text.length / source.trim().length;
+      if (ratio < range.min || ratio > range.max) {
+        rejected.push({ index: correction.index, reason: 'length' });
+        continue;
+      }
+    }
     // 仍然漏术语的“修正”没有价值，丢弃
     if (item.missing.length > 0) {
       const verdict = verifySegment({ source, translated: text, compiled, allowed: compiled.terms });
-      if (!verdict.ok) continue;
+      if (!verdict.ok) {
+        rejected.push({ index: correction.index, reason: 'term' });
+        continue;
+      }
     }
 
     next[item.index] = text;
-    applied.add(correction.index);
     count += 1;
   }
 
-  return { translations: next, corrected: count };
+  return { translations: next, corrected: count, rejected };
 }
