@@ -47,7 +47,7 @@
 
 目标是让 `DeepSeek V4.1 Flash` 不被译成「深度求索 4.1 闪电版」。
 
-- **内置词库**：797 条，来自人工 allowlist + 上游筛选快照（simple-icons、models.dev），构建时离线生成，运行时不联网。
+- **内置词库**：797 条，来自人工 allowlist + 上游筛选快照（simple-icons CC0、models.dev MIT），构建时离线生成，运行时不联网。
 - **自定义词表**：一行一个词，只做「保持原文」。
 - **型号规则**：`GPT-5`、`V4.1`、`M3.1` 这类“字母 + 版本号”自动保护；`V4` / `M3` 这类短型号靠词表里的全名。
 - **三档漏词策略**：
@@ -285,4 +285,4 @@ scripts/
 
 ## 许可
 
-本项目采用 [Apache License 2.0](LICENSE)，版权声明见 [NOTICE](NOTICE)。第三方数据来源与许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+本项目采用 [Apache License 2.0](LICENSE)，版权声明与第三方数据许可见 [NOTICE](NOTICE)。
