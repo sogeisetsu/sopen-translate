@@ -10,6 +10,16 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - 无后端：service worker 直接请求用户在设置页填的接口地址。
 - `extension/lib/glossary-data.json` 是数据产物，不是打包产物。
 
+## 分支与合并（硬约束）
+
+- **不要直接在 `main` 上开发。** 每个任务/阶段从最新 `main` 拉分支：
+  `git switch main && git pull && git switch -c feat/<topic>`。
+- 分支上小步提交；跑完该阶段验收后再合并：
+  `git switch main && git merge --no-ff feat/<topic>`，然后 `git push origin main`。
+- 合并前必须 `npm run check` + `npm run smoke` + `npm run smoke:dom` 全绿；冲突在分支上解决。
+- 不要 force-push `main`；不要为了省事直接 commit 到 `main`（除非用户明确要求）。
+- 命名用 `feat/...`、`fix/...`，一个分支只做一件事。
+
 ## 隐私与密钥（硬约束）
 
 - 仓库任何文件（源码、注释、测试、文档、计划、commit message）都不准出现真实 key / token / 密码 / 邮箱。仓库是公开的。

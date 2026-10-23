@@ -1,10 +1,51 @@
 # sopen-translate 实施方案：双语模式 + 术语保护 + 多 provider
 
-面向下一个执行会话的施工图。按 A → B → C → D 顺序施工，每阶段有独立验收命令，做完一段再动下一段。
-
 核心目标：`DeepSeek V4.1 Flash` 不该被译成“深度思考 4.1 闪电版”。
 
-本轮（2026-10-22）已把计划与仓库现状、线上端点、数据源重新对齐。下文的「决策记录」是本轮拍板项；标 **【实测】** 的是当天验证过的事实，标 **【未实测】** 的不要当成已验证。
+> 这份文件现在是「历史施工记录 + 剩余工作计划」。A–D、B6、E2 已完成并推送；
+> 新会话不要从头重做，直接从下面的「执行入口」开始。
+
+## 执行入口（2026-10-23，新会话先读这里）
+
+**已完成并推送**：阶段 A、B（含 B6）、C、D，以及 E2（关闭思考）。仓库版本 `0.2.0`，
+`check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
+**剩余工作只有**：E1、E3–E6（视口优先 + 滚动续翻）和 F1–F5（微软翻译 + 可选 AI 定点修正）。
+**不要重做 A–D**；它们的细节是历史记录，只在新改动碰到时查阅。
+
+### 施工顺序与分支（硬约束）
+
+1. 先读 `AGENTS.md`：分层、密钥、分批/并发/思考、真机测试路径都在那里。
+2. `git switch main && git pull`，然后从 `main` 拉分支：
+   - E：`git switch -c feat/viewport-first`
+   - F：等 E 合并后从 `main` 拉 `feat/microsoft-translator`（F 不依赖 E）。
+3. **不要直接在 `main` 上开发**。每个阶段小步提交，跑完验收再
+   `git switch main && git merge --no-ff feat/<topic>` 并推送；一个分支只做一件事。
+4. **先 E 后 F**：E 是体验收益最大的一步；F 默认走 Edge 内置免费接口（无需 key），Azure 只是可选的稳定版，F5 的 A/B 可能决定“不上审校层”。
+
+### 剩余阶段的改动面
+
+| 阶段 | 主要文件 | 验收 |
+| --- | --- | --- |
+| E1 | `types.d.ts`、`lib/settings.js`、`content.js`、`popup.*` | `check` + 设置回显 |
+| E3 | `content.js`（视口判定） | `smoke:dom` 视口用例 |
+| E4 | `content.js`（观察器 / 队列 / 防重复） | `smoke:dom` 滚动、还原、暂停 |
+| E5 | `content.js`、`popup.*` | `smoke:dom` + 手工 |
+| E6 | `scripts/dom-smoke.mjs` | 三套命令 + 四页真机 |
+| F1 | `types.d.ts`、`lib/protocols.js`、`lib/provider-presets.js`、`lib/languages.js`、`options.*` | `check` + `smoke` |
+| F2 | 建议新建 `lib/review.js`（纯函数）或放 `providers.js` | `smoke` 规则用例 |
+| F3 | `lib/providers.js`、`background.js`、`lib/settings.js`、`options.*` | `smoke` + Edge 真机 |
+| F4 | `options.*` | 手工 |
+| F5 | `scripts/smoke.mjs` | 四页 A/B |
+
+**F 的 key 前提**：`microsoft-edge` 走 Edge 内置翻译接口，**不需要 key**，F5 可以直接真机跑；
+`microsoft-azure` 才需要 key + region，没有 key 时只实现 + stub，标「接口未实测」。
+Edge 是内部接口，可能随时失效，别把产品只押在它上面。
+
+### 现有实现的关键参数（别照旧文档改回去）
+
+- 分批 / 并发 / 思考、超时 120s、失败补跑：见 `AGENTS.md` 的「分批、并发、思考」。
+- `lib/reasoning.js` 已存在；E/F 不要重复实现思考开关。
+- 权威验收数据：C6、B6、E2 各自章节末尾的实测记录。
 
 ---
 
@@ -46,7 +87,7 @@
 - [x] B2 `content.js`：块内追加双语译文 + 叶子容器回退 + 按句切分 + 统一还原 + 熔断 + 进度
 - [x] B3 `content.css`：`.sopen-translated-block`（唯一作用域例外）
 - [x] B4 popup：圆形主按钮 + 模式切换 + 语言下拉 + 轮询进度
-- [ ] B5 验收 B：`npm run smoke:dom` 通过（新增用例见 B5）
+- [x] B5 验收 B：`npm run smoke:dom` 通过（新增用例见 B5）
 - [x] **B6 批处理优化（2026-10-23 追加，用户要求）**：按字符预算而不是 20 段硬上限分批；协议感知段数上限；内容脚本有限并发；输出被截断时自动二分重试
 - [x] C1 词库：`glossary-allowlist.txt`、`glossary-snapshot.json`、`build-glossary.mjs` → `lib/glossary-data.json`（离线、入库）
 - [x] C2 术语匹配：`lib/glossary.js`（纯函数）
@@ -61,17 +102,17 @@
 - [ ] E4 续翻调度：scroll / resize / MutationObserver / visibilitychange，防重复
 - [ ] E5 UI 与状态：popup 范围切换、动态进度、toast 文案
 - [ ] E6 验收：假 DOM + 四页真机（首屏时间 / 滚动覆盖率 / 还原）
-- [ ] F1 微软翻译：`microsoft-translator` 协议 + 预设 + `region` + 语言码映射
+- [ ] F1 微软翻译：`microsoft-edge`（无 key）+ `microsoft-azure`（可选）+ 语言码映射
 - [ ] F2 规则筛可疑段：术语 / 空译 / 长度比 / 脚本 / 占位符 / 重复
 - [ ] F3 可选 AI 定点修正：第二 provider，只审可疑段、返回修正译文
 - [ ] F4 设置页：微软 `region` + 「审校服务」下拉 + 隐私说明
-- [ ] F5 验收：真 key + 四页 A/B；收益不足就不上审校层
+- [ ] F5 验收：Edge 免费接口四页 A/B；Azure 有 key 再补；收益不足就不上审校层
 
 ---
 
 ## 测试范围（硬约束，别扩大）
 
-只允许用这三个服务、这几个模型做真机/联网测试，**不要碰 OpenCode Go 下的其他模型**（每个都在烧 token）：
+只允许用这几个服务、这几个模型做真机/联网测试，**不要碰 OpenCode Go 下的其他模型**（每个都在烧 token）：
 
 | 服务 | 允许的模型 | 备注 |
 | --- | --- | --- |
@@ -81,6 +122,8 @@
 | OpenCode Go | `minimax-m3.1-flash-free` | ⚠️ **2026-10-23 实测已下线**：`410 ModelDeprecated`。改用 `mimo-v2.6-flash` |
 | OpenCode Go | ~~`longcat-2.5-preview`~~ | ❌ **已排除**：面板可见但 API 打不通（`402 Endpoint is unavailable` / `400 Model is unavailable`），`/models` 里也没有它。不要测、不要找替代模型 |
 | DeepL | 无需选模型 | ✅ key 已验证，字符额度 0/1,000,000 |
+| Microsoft Edge 翻译（免费） | 无需 key | 阶段 F 默认；Edge 内部接口，可能失效/限流 |
+| Microsoft Azure Translator | 无需选模型 | 可选；需要 key + region，F0 2M 字符/小时 |
 
 其它约束：
 
@@ -181,6 +224,10 @@
 
 ## 1. 现状快照
 
+> ⚠️ 下面 1.1–1.3 是 **2026-10-22 施工前**的记录（版本 0.1.0、2 个协议、9+6 个用例）。
+> 现在已经是 0.2.0、5 个协议、30+ 个用例。当前状态看「执行入口」与 C6/B6/E2 的验收记录；
+> 不要把这里的“现状”当成现在的代码。
+
 ### 1.1 动手前先读这些文件
 
 | 文件 | 现状 |
@@ -215,6 +262,7 @@
 10. **词库是构建产物**：`extension/lib/glossary-data.json` 只由 `npm run build:glossary` 生成，不手改；运行时只读，不联网。
 11. **模型缓存不落草稿**：`models.list` 可以用设置页里的未保存配置发请求，但只能把缓存写回“已保存且配置一致”的 provider。
 12. **测试不 import `background.js`**：service worker 依赖 `chrome.*`；冒烟测试只碰 `lib/*.js` 的纯函数与 `providers.js` 的 pipeline。
+13. **思考开关按模型判断**：`lib/reasoning.js` 只对支持的模型发关闭字段；强制思考的模型不发；400 回退后记住该配置。
 
 ### 1.3 文件清单与依赖顺序
 
@@ -230,6 +278,7 @@
 | `extension/lib/models.js` | `resolveModelsUrl` / `parseModelList` / `loadModelList` / `selectModels` |
 | `extension/lib/glossary.js` | `loadGlossary` / `matchTerms` / `buildPromptLines` / `verifySegment` |
 | `extension/lib/languages.js` | 10 项目标语言唯一来源 |
+| `extension/lib/reasoning.js` | 按预设 + 模型返回“关闭思考”的请求字段（纯函数） |
 | `scripts/build-glossary.mjs` | 词库生成（手动、离线） |
 | `scripts/glossary-allowlist.txt` | 人工维护的 DNT 词 |
 | `scripts/glossary-blocklist.txt` | 通用词/误伤词排除 |
@@ -884,6 +933,9 @@ npm run smoke
 - content 与 popup 都不缓存模式到模块级全局；每次翻译以存储为准。
 
 ## B2 `content.js` 重构
+
+> 注：本节写的 1200 字符 / 20 段是**初始实现**；B6 已改成 provider 策略（LLM 8000/400/8 等）。
+> 现在以 B6 和 `AGENTS.md` 为准，不要照这里的数字改回去。
 
 ### 1. 结构
 
@@ -1557,7 +1609,7 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 
 ---
 
-# 阶段 F：微软翻译 + AI 定点修正（2026-10-23 评估，待拍板）
+# 阶段 F：微软翻译 + AI 定点修正（2026-10-23 已拍板，待实施）
 
 ## F0 结论与边界
 
@@ -1566,21 +1618,45 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 
 改成：**MT 打底 → 规则筛可疑段 → 只让 LLM 修正可疑段并直接返回译文**。不阻塞首屏，不做评分仪表盘。
 
+微软侧默认用 Edge 内置免费接口（无需 key，KISS 同款）；Azure 官方作为可选稳定版。
+
 非目标：全量 AI 评分、评分 UI、Custom Translator 训练、把 MT 当术语表。
 
-## F1 微软翻译协议
+## F1 微软翻译协议（两种接入）
 
-- `ProtocolId` 增加 `microsoft-translator`；预设增加「Microsoft Translator」（真 key 跑过之前标「接口未实测」）。
+微软有两条完全不同的路：KISS 默认用的是 **Edge 内置翻译的内部免费接口**（无 key），不是 Azure。
+计划两条都保留：Edge 免费接口做默认，Azure 官方做可选稳定版。
+
+### F1a `microsoft-edge`（默认，无 key）
+
+- `ProtocolId` 增加 `microsoft-edge`；预设「Microsoft Edge 翻译」，`verified: false` 直到真机跑过。
+- 请求：`POST https://edge.microsoft.com/translate/translatetext?from=&to=<msCode>&isEnterpriseClient=false`
+  - 头：只 `Content-Type: application/json`；**没有 Authorization / key / region**。
+  - Body：**纯字符串数组** `["text1", "text2"]`（不是 Azure 的 `[{Text}]`）。
+  - 响应：`[{ id, result: ["译文", "检测到的源语言"] }]`；按 `id` 排序后取 `result[0]`，并校验数量。
+- 这是 Edge 浏览器内置翻译在用的内部接口：无 SLA、可能限流/改路径/加鉴权；失败时要能退回 Azure 或自定义。
+  （接口契约参考 KISS Translator 的行为与测试；它是 GPL-3.0，只参考行为，代码独立实现。）
+- 限额未公开：先按 **100 段 / 5,000 字符/请求、并发 4** 起步，用真机实测再调；`from` 留空自动检测。
+- `to` 用微软语言码：`zh-Hans` / `zh-Hant` / `en` / `ja` / `ko` / `fr` / `de` / `es` / `ru` / `pt`。
+- 术语：同样不支持请求级词表；靠 F2/F3。
+
+### F1b `microsoft-azure`（可选，官方）
+
+- `ProtocolId` 增加 `microsoft-azure`；预设「Microsoft Azure Translator」，`verified: false`。
 - 请求：`POST {baseUrl}/translate?api-version=3.0&to=<msCode>`
-  - 头：`Ocp-Apim-Subscription-Key`、`Content-Type: application/json`；
-    区域/多服务资源还要 `Ocp-Apim-Subscription-Region`（global 单服务可空）。
-  - Body：`texts.map((text) => ({ Text: text }))`，响应按输入顺序取 `translations[0].text`。
-- 限额：官方单请求 50,000 字符 / 1,000 个元素；F0 免费 2M 字符/小时，S1 40M/小时，无并发数限制。
-  本项目取保守值：**5,000 字符 / 100 段/请求**，并发 4，超时 30s。
-- 语言代码映射：`ZH-HANS → zh-Hans`、`ZH-HANT → zh-Hant`、`EN-US → en`、`PT-BR → pt`，
-  `JA/KO/FR/DE/ES/RU` 转小写；未知值原样小写透传。
-- 术语：标准 API **不支持请求级词表**；MT 照常翻，术语由 F2 的规则校验发现，再由 F3 修正。
-- `ProviderConfig` 增加可选 `region`；设置页只在微软预设显示该字段。
+  - 头：`Ocp-Apim-Subscription-Key` + `Content-Type`；区域/多服务资源还要 `Ocp-Apim-Subscription-Region`（global 单服务可空）。
+  - Body：`texts.map((text) => ({ Text: text }))`；响应按输入顺序取 `translations[0].text`。
+- 限额：单请求 50,000 字符 / 1,000 个元素；F0 免费 2M 字符/小时，S1 40M/小时。
+  本项目取保守值 **5,000 字符 / 100 段/请求**，并发 4，超时 30s。
+- `ProviderConfig` 增加可选 `region`；设置页只在 Azure 预设显示该字段。
+- 需要 Azure key；没有 key 时只实现 + stub，标「接口未实测」，不影响 Edge 免费接口的验收。
+
+### 共同
+
+- 语言码映射放在 `lib/languages.js`（`ZH-HANS → zh-Hans` 等），两种接入共用。
+- `readPolicy` 为微软协议加分支：`microsoft-edge` / `microsoft-azure` 都用 5,000 字符 / 100 段 / 4 路。
+- 设置页把「Edge（无需 key）」放在前面，Azure 标注「需要 key / 更稳定」。
+- 隐私提示：两者都会把页面文本发给微软。
 
 ## F2 规则筛可疑段（不花 LLM token）
 
@@ -1608,13 +1684,14 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 ## F4 设置页
 
 - 「审校服务（可选）」下拉：列出所有已配置的 LLM provider +「不审校」。
-- 微软卡片：`API Key`、`Region`（可空）、`baseUrl`；提示“微软不支持请求级术语表，术语靠规则校验 + 审校修正”。
+- Edge 卡片：没有 key / region 字段，只显示“无需 key；Edge 内部接口，可能失效”；真机跑过后再把 `verified` 置 true。
+- Azure 卡片：`API Key`、`Region`（可空）、`baseUrl`；提示“微软不支持请求级术语表，术语靠规则校验 + 审校修正”。
 - 结果提示：`已审校 N 段，修正 M 段`；不显示 1–10 分。
 - 隐私说明：页面文本会发给微软；配置了审校时还会发给所选 LLM。
 
 ## F5 验收
 
-- 接口：真 key 下 3 段中译、顺序、`zh-Hans`、region 头、429 重试；确认不触发 50k/1k 限额。
+- 接口：Edge 免费接口 3 段中译、顺序、`zh-Hans`、无 Authorization；Azure 有 key 再验 region 头 / 401 / 429；确认不触发限额。
 - A/B（四页，同目标语言）：
   - MT only vs MT + 审校；
   - 记录首屏时间、总耗时、请求数、MT 字符数、LLM token、送审段数、修正段数、术语保留率；
@@ -1623,8 +1700,9 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 
 ## F 风险
 
-- 微软 F0 每小时 2M 字符、滑动窗口；大页面要控速，别把额度打空。
+- Azure F0 每小时 2M 字符、滑动窗口；Edge 免费接口限额未公开。两种都要对大页面控速。
 - 区域头漏发会 401；global 资源可省，区域资源必填。
+- Edge 免费接口是内部端点，可能加鉴权或封掉；必须保留 Azure / 自定义作为退路，设置页写明。
 - MT 质量与 DeepL/LLM 不同，专有名词更弱；术语必须靠 F2/F3。
 - 混排（一段 MT、一段修正）语气可能不一致；双语模式同屏可见。
 - 多一个第三方数据流向；设置页和 README 要写清楚。
@@ -1634,11 +1712,12 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 
 # 施工约束（给执行者）
 
+- **不在 `main` 上直接开发**：从 `main` 拉 `feat/...` / `fix/...`；阶段完成、验收全绿后 `git switch main && git merge --no-ff <branch>` 并推送；一个分支只做一件事。
 - 不加大依赖；`package.json` 最多增加 `scripts` 条目。
 - 全程 `checkJs` 零错误；`content.js` 里出现 `import` 即为返工。
 - 不改 `host_permissions`、不改 `all_frames: false`、不引入构建产物（`glossary-data.json` 是数据产物，不是打包产物）。
 - `content.css` 的作用域例外只允许 `.sopen-translated-block` 一条；不要顺手把 toast 样式放出去。
-- 每个阶段结束都跑一次对应验收，别把三阶段的改动堆到最后一起调。
+- 每个阶段结束都跑一次对应验收，别把各阶段的改动堆到最后一起调。
 - 术语层出问题时先关掉 `useBuiltin` 复现，再判断是渲染、prompt 还是校验。
 - `models.list` 的缓存写入必须走 `patchProvider`，不要用设置页 draft 覆盖已保存配置。
 - 任何测试/示例/文档不得出现真实 key；OpenCode Go 的 session 是随机 UUID，不是密钥，但也不要写进仓库。
