@@ -24,7 +24,7 @@
    - 填 API Key → 点「刷新」拉模型 → 点「测试」确认连通 → 保存
 4. 点工具栏图标 → 「翻译」；再点「还原」回到原文
 
-> 设置页每个容易困惑的字段旁边都有 **圈 i**：鼠标悬停、键盘聚焦或点击即可看解释，`Esc` 或点别处关闭。
+> 设置页每个容易困惑的字段旁边都有 **ⓘ 信息提示**：鼠标悬停、键盘聚焦或点击即可查看解释，按 `Esc` 或点击别处关闭。
 
 ## 功能
 
@@ -247,7 +247,7 @@ extension/                 # chrome://extensions 直接加载这个目录
     debug-log.js           # 日志脱敏、截断、环形缓冲、导出（纯函数）
     http.js                # 超时、429 退避、ProviderError
     segments.js / prompt.js / models.js / glossary.js
-    ui-tip.js              # 圈 i 提示组件
+    ui-tip.js              # ⓘ 信息提示组件（悬停 / 键盘 / 触摸）
     glossary-data.json     # 内置词库（构建产物）
 scripts/
   smoke.mjs / dom-smoke.mjs
@@ -270,7 +270,7 @@ scripts/
 
 ## 状态
 
-`0.2.0`。已实现：视口优先与整页、纯译文与双语、还原、术语三档、9 种协议、18 个预设、模型刷新、异步审校 + diff/撤销、NVIDIA Riva / MiniMax、明暗主题与圈 i 提示、本地调试日志。
+`0.2.0`。已实现：视口优先与整页、纯译文与双语、还原、术语三档、9 种协议、18 个预设、模型刷新、异步审校 + diff/撤销、NVIDIA Riva / MiniMax、明暗主题与 ⓘ 信息提示、本地调试日志。
 
 尚未实现：划词 / 右键翻译、翻译缓存、快捷键、按站点开关、用量统计、术语指定译法、审校全量评分、NVIDIA 其他模型、G2 Translator API。
 
