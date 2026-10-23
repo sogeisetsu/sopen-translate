@@ -213,6 +213,8 @@ async function translate(texts, pageToken) {
     protected: result.protected,
     warnings: result.warnings,
     review,
+    reviewFailed: review ? review.failed : false,
+    reviewTruncated: review ? review.truncated : false,
   };
 }
 
