@@ -300,6 +300,12 @@ let translator = (text) => text;
 let responder = null;
 /** @type {Promise<void> | null} */
 let gate = null;
+/** @type {null | ((message: any) => any)} */
+let reviewResponder = null;
+/** @type {Promise<void> | null} */
+let reviewGate = null;
+/** @type {any[]} */
+const reviewCalls = [];
 /** @type {((message: any, sender: any, sendResponse: any) => any) | null} */
 let listener = null;
 /** @type {string[]} */
@@ -332,6 +338,26 @@ globalThis.chrome = {
         // 这里只测 content 的分批/并发，不关心真实协议。
         return { ok: true, active: { presetId: 'deepl', protocol: 'deepl' } };
       }
+      if (message.type === 'review.run') {
+        reviewCalls.push(message);
+        if (reviewGate) await reviewGate;
+        if (reviewResponder) {
+          const result = reviewResponder(message);
+          if (result instanceof Error) throw result;
+          return result;
+        }
+        return {
+          ok: true,
+          corrections: [],
+          rejected: [],
+          review: {
+            reviewed: message.items.length,
+            corrected: 0,
+            failed: false,
+            truncated: false,
+          },
+        };
+      }
       calls += 1;
       if (gate) await gate;
       seen.push(...message.texts);
@@ -351,7 +377,14 @@ globalThis.chrome = {
   storage: {
     local: {
       async get() {
-        return { settings: { displayMode, translateScope } };
+        return {
+          settings: {
+            displayMode,
+            translateScope,
+            targetLang: '简体中文',
+            targetLangCode: 'ZH-HANS',
+          },
+        };
       },
     },
   },
@@ -419,6 +452,9 @@ async function resetPageStub() {
   translator = (text) => `中:${text}`;
   responder = null;
   gate = null;
+  reviewResponder = null;
+  reviewGate = null;
+  reviewCalls.length = 0;
   seen.length = 0;
   calls = 0;
 }
@@ -881,6 +917,264 @@ await test('visibilitychange：隐藏时暂停补翻，恢复后补扫', async (
   fakeDocument.hidden = false;
   fireListener(documentListeners, 'visibilitychange');
   await waitFor(() => far.textContent === '中:Hidden tab');
+});
+
+await test('异步审校：translate 立即返回并渲染，审校响应后按 id 打补丁', async () => {
+  await resetPageStub();
+  const para = el('p', 'Kubernetes runs containers.');
+  resetBody(para);
+
+  /** @type {() => void} */
+  let release = () => {};
+  reviewGate = new Promise((resolve) => {
+    release = () => resolve();
+  });
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewCandidates: [{ index: 0, reasons: ['term'], missing: ['Kubernetes'] }],
+  });
+  reviewResponder = (message) => ({
+    ok: true,
+    corrections: [{ id: message.items[0].id, corrected: 'Kubernetes 运行容器。' }],
+    rejected: [],
+    review: { reviewed: 1, corrected: 1, failed: false, truncated: false },
+  });
+
+  const result = await send({ type: 'page.translate' });
+  assert.equal(result.ok, true, result.error);
+  // 审校还卡在 gate 上，首屏已经渲染完
+  assert.equal(para.textContent, '中:Kubernetes runs containers.');
+  const during = await send({ type: 'page.status' });
+  assert.equal(during.translated, 1);
+  assert.equal(during.review.pending, true);
+  assert.equal(during.review.reviewed, 0);
+
+  await waitFor(() => reviewCalls.length === 1);
+  assert.equal(reviewCalls[0].items[0].source, 'Kubernetes runs containers.');
+  assert.equal(reviewCalls[0].items[0].primary, '中:Kubernetes runs containers.');
+  assert.equal(reviewCalls[0].target, '简体中文');
+  assert.equal(reviewCalls[0].targetCode, 'ZH-HANS');
+  assert.deepEqual(reviewCalls[0].items[0].reasons, ['term']);
+
+  release();
+  await waitFor(() => para.textContent === 'Kubernetes 运行容器。');
+  const after = await send({ type: 'page.status' });
+  assert.equal(after.review.pending, false);
+  assert.equal(after.review.reviewed, 1);
+  assert.equal(after.review.corrected, 1);
+});
+
+await test('异步审校：还原后晚到的响应被 generation 丢弃', async () => {
+  await resetPageStub();
+  const para = el('p', 'Kubernetes runs containers.');
+  resetBody(para);
+
+  /** @type {() => void} */
+  let release = () => {};
+  reviewGate = new Promise((resolve) => {
+    release = () => resolve();
+  });
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewCandidates: [{ index: 0, reasons: ['term'], missing: ['Kubernetes'] }],
+  });
+  reviewResponder = (message) => ({
+    ok: true,
+    corrections: [{ id: message.items[0].id, corrected: 'Kubernetes 运行容器。' }],
+    rejected: [],
+    review: { reviewed: 1, corrected: 1, failed: false, truncated: false },
+  });
+
+  await send({ type: 'page.translate' });
+  await waitFor(() => reviewCalls.length === 1);
+
+  const restore = await send({ type: 'page.restore' });
+  assert.equal(restore.ok, true);
+  release();
+  await sleep(80);
+
+  assert.equal(para.textContent, 'Kubernetes runs containers.', '还原后不能被迟到的修正污染');
+  const status = await send({ type: 'page.status' });
+  assert.equal(status.review.reviewed, 0);
+  assert.equal(status.review.corrected, 0);
+});
+
+await test('异步审校（双语）：只改对应 chunk，重新 join 后 span 正确', async () => {
+  await resetPageStub();
+  displayMode = 'bilingual';
+  const long = '这是第一句。'.repeat(220);
+  assert.ok(long.length > 1200);
+  const para = el('p', long);
+  resetBody(para);
+
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `译${text}`),
+    protected: 0,
+    warnings: [],
+    // 第二个 chunk 可疑
+    reviewCandidates: [{ index: 1, reasons: ['length'], missing: [] }],
+  });
+  reviewResponder = (message) => ({
+    ok: true,
+    corrections: [{ id: message.items[0].id, corrected: '修正后的第二段。' }],
+    rejected: [],
+    review: { reviewed: 1, corrected: 1, failed: false, truncated: false },
+  });
+
+  const result = await send({ type: 'page.translate' });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(directSpans(para).length, 1);
+  const before = directSpans(para)[0].textContent;
+
+  await waitFor(() => directSpans(para)[0].textContent !== before, 3000);
+  const span = directSpans(para)[0];
+  assert.equal(para.children.filter((child) => child.tagName === 'SPAN').length, 1, '仍然只有一个 span');
+  assert.ok(span.textContent.endsWith('修正后的第二段。'), span.textContent);
+  assert.ok(span.textContent.startsWith('译这是第一句。'), '第一段译文不受影响');
+});
+
+await test('异步审校：undo 只把 applied 的修正换回主译文', async () => {
+  await resetPageStub();
+  const first = el('p', 'Kubernetes runs containers.');
+  const second = el('p', 'Kubernetes runs pods.');
+  resetBody(first, second);
+
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewCandidates: [
+      { index: 0, reasons: ['term'], missing: ['Kubernetes'] },
+      { index: 1, reasons: ['term'], missing: ['Kubernetes'] },
+    ],
+  });
+  reviewResponder = (message) => ({
+    ok: true,
+    // 只修正第一条；第二条保持主译文
+    corrections: [{ id: message.items[0].id, corrected: 'Kubernetes 运行容器。' }],
+    rejected: [{ id: message.items[1].id, reason: 'unchanged' }],
+    review: { reviewed: 2, corrected: 1, failed: false, truncated: false },
+  });
+
+  await send({ type: 'page.translate' });
+  await waitFor(() => first.textContent === 'Kubernetes 运行容器。');
+  assert.equal(second.textContent, '中:Kubernetes runs pods.');
+
+  const review = await send({ type: 'page.review' });
+  assert.equal(review.ok, true);
+  assert.equal(review.summary.corrected, 1);
+  assert.equal(review.summary.rejected, 1);
+  assert.equal(review.log.length, 2);
+  assert.equal(review.log[0].applied, true);
+  assert.equal(review.log[1].applied, false);
+
+  const undo = await send({ type: 'page.review.undo' });
+  assert.equal(undo.ok, true);
+  assert.equal(undo.undone, 1);
+  assert.equal(first.textContent, '中:Kubernetes runs containers.');
+  assert.equal(second.textContent, '中:Kubernetes runs pods.', '未 applied 的不动');
+
+  const after = await send({ type: 'page.review' });
+  assert.equal(after.summary.corrected, 0);
+});
+
+await test('异步审校：失败退避一次，仍失败则保留主译文并标记 failed', async () => {
+  await resetPageStub();
+  const para = el('p', 'Kubernetes runs containers.');
+  resetBody(para);
+
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewCandidates: [{ index: 0, reasons: ['term'], missing: ['Kubernetes'] }],
+  });
+  reviewResponder = () => new Error('review down');
+
+  await send({ type: 'page.translate' });
+  await waitFor(() => reviewCalls.length === 2, 4000);
+  const status = await send({ type: 'page.status' });
+  assert.equal(status.review.failed, true);
+  assert.equal(status.review.pending, false);
+  assert.equal(para.textContent, '中:Kubernetes runs containers.');
+});
+
+await test('异步审校：节点断开时跳过补丁，不写错节点', async () => {
+  await resetPageStub();
+  const para = el('p', 'Kubernetes runs containers.');
+  const other = el('p', 'Kubernetes runs pods.');
+  resetBody(para, other);
+
+  /** @type {() => void} */
+  let release = () => {};
+  reviewGate = new Promise((resolve) => {
+    release = () => resolve();
+  });
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewCandidates: [{ index: 0, reasons: ['term'], missing: ['Kubernetes'] }],
+  });
+  reviewResponder = (message) => ({
+    ok: true,
+    corrections: [{ id: message.items[0].id, corrected: 'Kubernetes 运行容器。' }],
+    rejected: [],
+    review: { reviewed: 1, corrected: 1, failed: false, truncated: false },
+  });
+
+  await send({ type: 'page.translate' });
+  await waitFor(() => reviewCalls.length === 1);
+  para.remove();
+  release();
+  await sleep(120);
+
+  assert.equal(other.textContent, '中:Kubernetes runs pods.', '不能把译文写到别的节点');
+  const review = await send({ type: 'page.review' });
+  assert.equal(review.summary.corrected, 0);
+  assert.equal(review.log[0].applied, false);
+  assert.equal(review.log[0].rejectedReason, 'detached');
+});
+
+await test('异步审校：LLM 主翻译 / 空候选都不产生 review.run', async () => {
+  await resetPageStub();
+  const para = el('p', 'Kubernetes runs containers.');
+  resetBody(para);
+
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewSkipped: 'llm-primary',
+    reviewCandidates: [],
+  });
+
+  await send({ type: 'page.translate' });
+  await sleep(600);
+  assert.equal(reviewCalls.length, 0, 'LLM 主翻译不应发审校请求');
+
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewCandidates: [],
+  });
+  await send({ type: 'page.restore' });
+  await send({ type: 'page.translate' });
+  await sleep(600);
+  assert.equal(reviewCalls.length, 0, '空候选不应发审校请求');
 });
 
 if (failures > 0) {

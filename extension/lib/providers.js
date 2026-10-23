@@ -17,7 +17,7 @@
 import { ProviderError, fail } from './http.js';
 import { PROTOCOLS, getProtocol } from './protocols.js';
 import { compileGlossary, matchTerms, promptTerms, verifySegment } from './glossary.js';
-import { applyReviewCorrections, buildReviewRequest, findSuspicious, parseReviewResponse } from './review.js';
+import { applyReviewCorrections, buildReviewRequest, parseReviewResponse } from './review.js';
 
 /**
  * @param {string[]} translations
@@ -214,63 +214,53 @@ async function runBatch(args, allowSplit) {
 
 /**
  * 审校层：主翻译（尤其是 MT）之后，只把规则筛出的可疑段交给第二个 LLM 修正。
- * 失败、数量不符、校验不过的修正都保留主译文，绝不整段回退。
+ * 只返回校正结果与拒绝原因；DOM 补丁由 content 按 id 完成。
+ * 失败、数量不符、校验不过的修正都丢弃，绝不整段回退。
  *
  * @param {Object} args
- * @param {string[]} args.sources
- * @param {string[]} args.translations
+ * @param {import('../../types').ReviewRunItem[]} args.items
  * @param {ProviderConfig} args.config 审校服务
  * @param {string} args.target
  * @param {string} args.targetCode
+ * @param {{ title?: string, host?: string, kind?: string }} [args.context] 页面上下文（只给域名/类型）
  * @param {string[]} [args.glossary]
  * @param {Record<string, string>} [args.extraHeaders]
  * @param {{ delays: number[] }} [args.retry]
- * @param {number} [args.maxSegments] 本页剩余可送审段数
- * @param {number} [args.maxChars] 本页剩余可送审字符数
- * @returns {Promise<{ translations: string[], review: import('../../types').ReviewOutcome, usedChars: number }>}
+ * @returns {Promise<{ corrections: import('../../types').ReviewIdCorrection[], rejected: import('../../types').ReviewRejection[], review: import('../../types').ReviewRunResult, usedChars: number }>}
  */
 export async function reviewTranslations({
-  sources,
-  translations,
+  items,
   config,
   target,
   targetCode,
+  context,
   glossary = [],
   extraHeaders,
   retry,
-  maxSegments,
-  maxChars,
 }) {
   const protocol = getProtocol(config.protocol);
   const compiled = compileGlossary(Array.isArray(glossary) ? glossary : []);
-  const { items, truncated } = findSuspicious({
-    sources,
-    translations,
-    compiled,
-    targetCode,
-    ...(typeof maxSegments === 'number' ? { maxSegments } : {}),
-    ...(typeof maxChars === 'number' ? { maxChars } : {}),
-  });
-  const usedChars = items.reduce(
-    (sum, item) =>
-      sum +
-      String(sources[item.index] ?? '').length +
-      String(translations[item.index] ?? '').length,
+  const sources = items.map((item) => String(item.source ?? ''));
+  const translations = items.map((item) => String(item.primary ?? ''));
+  const usedChars = sources.reduce(
+    (sum, source, index) => sum + source.length + translations[index].length,
     0,
   );
-  const base = { reviewed: items.length, corrected: 0, failed: false, truncated };
+  const base = { reviewed: items.length, corrected: 0, failed: false, truncated: false };
 
   // 审校服务必须是能接收 prompt 的 LLM；配成 MT 说明配置有问题，直接标记失败
   if (protocol.supportsGlossary === false) {
-    return { translations, review: { ...base, failed: true }, usedChars };
+    return { corrections: [], rejected: [], review: { ...base, failed: true }, usedChars };
   }
-  if (items.length === 0) return { translations, review: base, usedChars };
+  if (items.length === 0) {
+    return { corrections: [], rejected: [], review: base, usedChars };
+  }
   if (typeof protocol.requestContent !== 'function') {
-    return { translations, review: { ...base, failed: true }, usedChars };
+    return { corrections: [], rejected: [], review: { ...base, failed: true }, usedChars };
   }
 
   try {
-    const request = buildReviewRequest({ target, items, sources, translations });
+    const request = buildReviewRequest({ target, items, context });
     const content = await protocol.requestContent({
       texts: [],
       config,
@@ -282,16 +272,45 @@ export async function reviewTranslations({
       system: request.system,
       userContent: request.userContent,
     });
-    const corrections = parseReviewResponse(content);
-    const applied = applyReviewCorrections({ sources, translations, items, corrections, compiled });
+    const parsed = parseReviewResponse(content);
+    const applied = applyReviewCorrections({
+      sources,
+      translations,
+      items: items.map((item, index) => ({
+        index,
+        reasons: item.reasons,
+        missing: item.missing,
+      })),
+      corrections: parsed,
+      compiled,
+      targetCode,
+    });
+
+    /** @type {import('../../types').ReviewIdCorrection[]} */
+    const corrections = [];
+    applied.translations.forEach((text, index) => {
+      if (text === translations[index]) return;
+      const from = items[index];
+      if (!from) return;
+      corrections.push({ id: from.id, corrected: text });
+    });
+    /** @type {import('../../types').ReviewRejection[]} */
+    const rejected = applied.rejected
+      .map((entry) => {
+        const from = items[entry.index];
+        return from ? { id: from.id, reason: entry.reason } : null;
+      })
+      .filter((entry) => entry !== null);
+
     return {
-      translations: applied.translations,
-      review: { ...base, corrected: applied.corrected },
+      corrections,
+      rejected,
+      review: { ...base, corrected: corrections.length },
       usedChars,
     };
   } catch (err) {
     console.warn('[sopen-translate] 审校失败，保留主译文', err);
-    return { translations, review: { ...base, failed: true }, usedChars };
+    return { corrections: [], rejected: [], review: { ...base, failed: true }, usedChars };
   }
 }
 

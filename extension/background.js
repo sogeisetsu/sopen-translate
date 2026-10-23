@@ -12,10 +12,18 @@ import {
   patchProvider,
 } from './lib/settings.js';
 import { getPreset } from './lib/provider-presets.js';
+import { getProtocol } from './lib/protocols.js';
 import { loadModelList, resolveModelsUrl } from './lib/models.js';
-import { normalizeTerms } from './lib/glossary.js';
+import { compileGlossary, normalizeTerms } from './lib/glossary.js';
 import { reviewTranslations, translateBatch } from './lib/providers.js';
-import { REVIEW_MAX_CHARS, REVIEW_MAX_SEGMENTS } from './lib/review.js';
+import {
+  REVIEW_MAX_CHARS,
+  REVIEW_MAX_SEGMENTS,
+  findSuspicious,
+  hostOf,
+  pageKind,
+  selectReviewItems,
+} from './lib/review.js';
 
 /** @typedef {import('../types').ProviderConfig} ProviderConfig */
 /** @typedef {import('../types').Settings} Settings */
@@ -79,6 +87,8 @@ function route(message) {
   switch (message?.type) {
     case 'translate':
       return translate(message.texts, message.pageToken);
+    case 'review.run':
+      return runReview(message);
     case 'testProvider':
       return testProvider(message.config, message.sample);
     case 'status':
@@ -171,51 +181,143 @@ async function translate(texts, pageToken) {
     extraHeaders,
   });
 
-  // 可选审校层：主译文不动，只让第二个 LLM 修正规则筛出的可疑段。
-  let translations = result.translations;
-  /** @type {import('../types').ReviewOutcome | undefined} */
-  let review;
+  // 审校已改为异步：这里只做纯 CPU 规则筛选，把可疑段随主译文一起返回。
+  // LLM 主翻译已走术语注入 + repair，不再重复审校（MT-only 门禁）。
   const reviewProvider = settings.reviewProviderId
     ? settings.providers.find((p) => p.id === settings.reviewProviderId)
     : null;
-  if (reviewProvider) {
-    const token = typeof pageToken === 'string' && pageToken ? pageToken : 'default';
-    const budget = reviewBudget(token);
-    const remainingSegments = Math.max(0, REVIEW_MAX_SEGMENTS - budget.segments);
-    const remainingChars = Math.max(0, REVIEW_MAX_CHARS - budget.chars);
 
-    if (remainingSegments === 0 || remainingChars === 0) {
-      // 本页审校预算用完：主译文照常返回，不再送审
-      review = { reviewed: 0, corrected: 0, failed: false, truncated: true };
-    } else {
-      const reviewed = await reviewTranslations({
+  /** @type {import('../types').ReviewCandidate[]} */
+  let reviewCandidates = [];
+  /** @type {string | undefined} */
+  let reviewSkipped;
+  if (reviewProvider) {
+    const primaryProtocol = getProtocol(provider.protocol);
+    if (primaryProtocol.supportsGlossary !== false) {
+      reviewSkipped = 'llm-primary';
+    } else if (getProtocol(reviewProvider.protocol).supportsGlossary !== false) {
+      const compiled = compileGlossary(glossary);
+      reviewCandidates = findSuspicious({
         sources: list,
-        translations,
-        config: reviewProvider,
-        target: settings.targetLang,
+        translations: result.translations,
+        compiled,
         targetCode: settings.targetLangCode,
-        glossary,
-        extraHeaders: await sessionHeaders(reviewProvider),
-        maxSegments: remainingSegments,
-        maxChars: remainingChars,
-      });
-      translations = reviewed.translations;
-      review = reviewed.review;
-      budget.segments += reviewed.review.reviewed;
-      budget.chars += reviewed.usedChars;
-      budget.at = Date.now();
+      }).items;
     }
+    // 审校服务本身是 MT：选项页已过滤，这里直接不给候选，也不发请求
   }
+
+  /** @type {Record<string, any>} */
+  const response = {
+    ok: true,
+    translations: result.translations,
+    protected: result.protected,
+    warnings: result.warnings,
+  };
+  if (reviewProvider) {
+    response.reviewCandidates = reviewCandidates;
+    if (reviewSkipped) response.reviewSkipped = reviewSkipped;
+  }
+  return response;
+}
+
+/**
+ * content 在主译文渲染后主动发起审校；预算按 pageToken 累计。
+ * @param {any} message
+ */
+async function runReview(message) {
+  const settings = await getSettings();
+  const reviewProvider = settings.reviewProviderId
+    ? settings.providers.find((p) => p.id === settings.reviewProviderId)
+    : null;
+  if (!reviewProvider) return { ok: false, error: '没有配置审校服务' };
+
+  const items = sanitizeReviewItems(message?.items);
+  /** @type {import('../types').ReviewRunResult} */
+  const base = { reviewed: 0, corrected: 0, failed: false, truncated: false };
+  if (items.length === 0) {
+    return { ok: true, corrections: [], rejected: [], review: base };
+  }
+
+  const token =
+    typeof message.pageToken === 'string' && message.pageToken ? message.pageToken : 'default';
+  const budget = reviewBudget(token);
+  const remainingSegments = Math.max(0, REVIEW_MAX_SEGMENTS - budget.segments);
+  const remainingChars = Math.max(0, REVIEW_MAX_CHARS - budget.chars);
+  if (remainingSegments === 0 || remainingChars === 0) {
+    return { ok: true, corrections: [], rejected: [], review: { ...base, truncated: true } };
+  }
+
+  // 预算按「原文 + 主译文」字符数算，避免一大段把整页预算吃光
+  const selected = selectReviewItems(items, {
+    maxSegments: remainingSegments,
+    maxChars: remainingChars,
+  });
+  const picked = selected.items;
+  const truncated = selected.truncated;
+  if (picked.length === 0) {
+    return { ok: true, corrections: [], rejected: [], review: { ...base, truncated: true } };
+  }
+
+  const glossary = await getGlossaryTerms(settings);
+  const url = String(message?.context?.url ?? '');
+  const reviewed = await reviewTranslations({
+    items: picked,
+    config: reviewProvider,
+    target:
+      typeof message?.target === 'string' && message.target
+        ? message.target
+        : settings.targetLang,
+    targetCode:
+      typeof message?.targetCode === 'string' && message.targetCode
+        ? message.targetCode
+        : settings.targetLangCode,
+    context: {
+      title: String(message?.context?.title ?? ''),
+      host: hostOf(url),
+      kind: pageKind(url),
+    },
+    glossary,
+    extraHeaders: await sessionHeaders(reviewProvider),
+  });
+
+  budget.segments += reviewed.review.reviewed;
+  budget.chars += reviewed.usedChars;
+  budget.at = Date.now();
 
   return {
     ok: true,
-    translations,
-    protected: result.protected,
-    warnings: result.warnings,
-    review,
-    reviewFailed: review ? review.failed : false,
-    reviewTruncated: review ? review.truncated : false,
+    corrections: reviewed.corrections,
+    rejected: reviewed.rejected,
+    review: { ...reviewed.review, truncated: reviewed.review.truncated || truncated },
   };
+}
+
+/**
+ * 只接受结构正确的送审项；content 是唯一来源，但消息通道不能假设输入可信。
+ * @param {any} items
+ * @returns {import('../types').ReviewRunItem[]}
+ */
+function sanitizeReviewItems(items) {
+  if (!Array.isArray(items)) return [];
+  /** @type {import('../types').ReviewRunItem[]} */
+  const out = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const id = String(item.id ?? '').trim();
+    const source = String(item.source ?? '');
+    if (!id || !source.trim()) continue;
+    out.push({
+      id,
+      source,
+      primary: String(item.primary ?? ''),
+      reasons: Array.isArray(item.reasons) ? item.reasons.map(String).slice(0, 8) : [],
+      missing: Array.isArray(item.missing) ? item.missing.map(String).slice(0, 20) : [],
+      ...(item.prev ? { prev: String(item.prev).slice(0, 200) } : {}),
+      ...(item.next ? { next: String(item.next).slice(0, 200) } : {}),
+    });
+  }
+  return out;
 }
 
 /**

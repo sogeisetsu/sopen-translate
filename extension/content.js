@@ -53,6 +53,12 @@
   const RETRY_CONCURRENCY = 2;
   const LEAF_CONTAINER_MIN_CHARS = 40;
 
+  /** 异步审校：批次合并窗口、失败退避、diff 上限、单批送审上限 */
+  const REVIEW_DEBOUNCE_MS = 400;
+  const REVIEW_RETRY_MS = 1500;
+  const REVIEW_LOG_MAX = 100;
+  const REVIEW_QUEUE_MAX = 200;
+
   /** 视口判定的上下余量：比一屏多一点，滚动时几乎不用等 */
   const VIEWPORT_MARGIN = 500;
   const SCROLL_THROTTLE_MS = 200;
@@ -68,6 +74,11 @@
 
   /** @typedef {{ chars: number, items: number, concurrency: number }} Policy */
   /** @typedef {{ el: Element, text: string }} Block */
+
+  /**
+   * @typedef {{ kind: 'text', node: Text, primaryFull: string, appliedFull: string | null }
+   *   | { kind: 'block', el: Element, chunkIndex: number }} ReviewTarget
+   */
 
   const state = {
     /** @type {'translation' | 'bilingual'} */
@@ -108,6 +119,37 @@
     policy: null,
     /** 本轮页面翻译的 token：后台按它累计审校预算，还原/重新翻译时换新的 */
     pageToken: '',
+    /** 本轮的目标语言：审校请求要用，跟主翻译保持同一代设置 */
+    target: '',
+    targetCode: '',
+    /**
+     * 审校代次：每次 resetPage 递增。晚到的 review 响应 generation 不一致就丢弃，
+     * 否则会出现“已还原的页面上又被写回一句译文”。
+     */
+    generation: 0,
+    /** @type {Map<string, ReviewTarget>} id → DOM 目标，补丁/撤销都按它找 */
+    reviewTargets: new Map(),
+    /** @type {WeakMap<Text, string>} */
+    textIds: new WeakMap(),
+    /** @type {WeakMap<Element, string>} */
+    blockIds: new WeakMap(),
+    /** @type {Map<Element, string[]>} 双语：每块的译文分片（修正后重新 join） */
+    blockTranslations: new Map(),
+    /** @type {Map<Element, HTMLElement>} 双语：已插入的译文 span */
+    blockSpans: new Map(),
+    /** @type {Map<Element, string>} 双语：块内原文，修正后可插入原本没插入的块 */
+    blockSources: new Map(),
+    idSeq: 0,
+    /** @type {import('../types').ReviewRunItem[]} */
+    reviewQueue: [],
+    reviewTimer: 0,
+    reviewInFlight: false,
+    /** 同一批失败最多退避重试一次 */
+    reviewAttempts: 0,
+    /** @type {import('../types').ReviewLogEntry[]} */
+    reviewLog: [],
+    /** @type {import('../types').ReviewStatus} */
+    review: { pending: false, reviewed: 0, corrected: 0, failed: false, truncated: false },
   };
 
   /** @type {HTMLDivElement | null} */
@@ -121,7 +163,7 @@
 
   /**
    * @param {string[]} texts
-   * @returns {Promise<{ translations: string[], protected: number, warnings: { index: number, missing: string[] }[], review?: { reviewed: number, corrected: number, failed: boolean, truncated: boolean } }>}
+   * @returns {Promise<{ translations: string[], protected: number, warnings: { index: number, missing: string[] }[], reviewCandidates: import('../types').ReviewCandidate[], reviewSkipped?: string }>}
    */
   async function requestTranslate(texts) {
     const res = await chrome.runtime.sendMessage({
@@ -139,7 +181,8 @@
       translations,
       protected: Number(res.protected) || 0,
       warnings: Array.isArray(res.warnings) ? res.warnings : [],
-      review: res.review,
+      reviewCandidates: Array.isArray(res.reviewCandidates) ? res.reviewCandidates : [],
+      reviewSkipped: typeof res.reviewSkipped === 'string' ? res.reviewSkipped : undefined,
     };
   }
 
@@ -163,6 +206,9 @@
       if (active?.protocol === 'google-free') {
         // 非官方接口一次只能一个 q：小批 + 串行，别一次打太多
         policy = { chars: 1500, items: 10, concurrency: 1 };
+      } else if (active?.protocol === 'nvidia-riva') {
+        // Riva 是专用翻译模型：协议内部一段一请求，外面用 2 路并发即可
+        policy = { chars: 3000, items: 10, concurrency: 2 };
       } else if (active?.protocol === 'deepl') {
         policy = { chars: 3000, items: 50, concurrency: 4 };
       } else if (active?.protocol === 'microsoft-edge' || active?.protocol === 'microsoft-azure') {
@@ -691,7 +737,13 @@
 
       const text = joinChunks(parts).trim();
       if (!text) return;
-      // 术语回退时译文可能等于原文：不要再复制一份
+
+      // 记下分片与原文：迟到的审校修正要重算 join，撤销也要换回主译文
+      const chunks = parts.map((part) => String(part ?? '').trim());
+      state.blockTranslations.set(block.el, chunks);
+      state.blockSources.set(block.el, block.text);
+
+      // 术语回退时译文可能等于原文：不要再复制一份（修正后仍可插入）
       if (text === block.text.trim()) return;
 
       const span = document.createElement('span');
@@ -704,6 +756,7 @@
       else block.el.appendChild(span);
 
       state.injected.push(span);
+      state.blockSpans.set(block.el, span);
       inserted += 1;
     });
     return { inserted, remaining };
@@ -726,6 +779,10 @@
     disconnectObservers();
     clearTimeout(state.scanTimer);
     state.scanTimer = 0;
+    clearTimeout(state.reviewTimer);
+    state.reviewTimer = 0;
+    // 代次递增：晚到的 review 响应看到 generation 不一致就直接丢弃
+    state.generation += 1;
 
     for (const el of state.injected) {
       if (typeof el.remove === 'function') el.remove();
@@ -746,7 +803,22 @@
     state.pendingScan = false;
     state.policy = null;
     state.pageToken = '';
+    state.target = '';
+    state.targetCode = '';
     state.progress = { done: 0, total: 0 };
+
+    state.reviewTargets = new Map();
+    state.textIds = new WeakMap();
+    state.blockIds = new WeakMap();
+    state.blockTranslations = new Map();
+    state.blockSpans = new Map();
+    state.blockSources = new Map();
+    state.idSeq = 0;
+    state.reviewQueue = [];
+    state.reviewInFlight = false;
+    state.reviewAttempts = 0;
+    state.reviewLog = [];
+    state.review = { pending: false, reviewed: 0, corrected: 0, failed: false, truncated: false };
   }
 
   function restorePage() {
@@ -760,21 +832,23 @@
   /* ------------------------------- 设置 ------------------------------- */
 
   /**
-   * 模式与范围同一次读取，避免两套逻辑读到不同代的设置。
-   * @returns {Promise<{ mode: 'translation' | 'bilingual', scope: 'viewport' | 'whole' }>}
+   * 模式、范围、目标语言同一次读取，避免几套逻辑读到不同代的设置。
+   * @returns {Promise<{ mode: 'translation' | 'bilingual', scope: 'viewport' | 'whole', target: string, targetCode: string }>}
    */
   async function readPageSettings() {
     try {
-      const data = /** @type {{ settings?: { displayMode?: string, translateScope?: string } }} */ (
+      const data = /** @type {{ settings?: { displayMode?: string, translateScope?: string, targetLang?: string, targetLangCode?: string } }} */ (
         await chrome.storage.local.get('settings')
       );
       const settings = data.settings || {};
       return {
         mode: settings.displayMode === 'bilingual' ? 'bilingual' : 'translation',
         scope: settings.translateScope === 'whole' ? 'whole' : 'viewport',
+        target: typeof settings.targetLang === 'string' ? settings.targetLang : '',
+        targetCode: typeof settings.targetLangCode === 'string' ? settings.targetLangCode : '',
       };
     } catch {
-      return { mode: 'translation', scope: 'viewport' };
+      return { mode: 'translation', scope: 'viewport', target: '', targetCode: '' };
     }
   }
 
@@ -793,24 +867,281 @@
 
   /**
    * @param {string} prefix
-   * @param {{ failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean, truncated?: boolean } }} summary
+   * @param {{ failed: number, protected: number, warnings: number, stopped: boolean }} summary
    */
-  function summaryText(prefix, { failed, protected: protectedCount, warnings, stopped, review }) {
+  function summaryText(prefix, { failed, protected: protectedCount, warnings, stopped }) {
     const parts = [prefix];
     if (failed > 0) parts.push(`${failed} 段失败`);
     if (protectedCount > 0) parts.push(`${protectedCount} 段保留原文`);
     if (warnings > 0) parts.push(`${warnings} 段可能未保留术语`);
-    if (review && review.reviewed > 0) {
-      parts.push(
-        review.failed
-          ? `审校失败，保留原译文`
-          : `已审校 ${review.reviewed} 段，修正 ${review.corrected} 段${
-              review.truncated ? '（预算已满）' : ''
-            }`,
-      );
-    }
     if (stopped) parts.push('连续失败，已停止');
     return parts.join('，');
+  }
+
+  /* ------------------------------- 异步审校 ------------------------------- */
+
+  /** @param {Text} node @returns {string} */
+  function textId(node) {
+    let id = state.textIds.get(node);
+    if (!id) {
+      state.idSeq += 1;
+      id = `n${state.idSeq}`;
+      state.textIds.set(node, id);
+    }
+    return id;
+  }
+
+  /** @param {Element} el @returns {string} */
+  function blockId(el) {
+    let id = state.blockIds.get(el);
+    if (!id) {
+      state.idSeq += 1;
+      id = `b${state.idSeq}`;
+      state.blockIds.set(el, id);
+    }
+    return id;
+  }
+
+  /**
+   * 把一批可疑段转成送审项：candidates 的 index 是**本批**下标，
+   * resolve 负责把它映射到稳定 id 与原文/主译文。
+   * @param {import('../types').ReviewCandidate[]} candidates
+   * @param {(index: number) => (import('../types').ReviewRunItem | null)} resolve
+   */
+  function enqueueReviewCandidates(candidates, resolve) {
+    if (candidates.length === 0) return;
+    for (const candidate of candidates) {
+      if (!candidate || !Number.isInteger(candidate.index)) continue;
+      const item = resolve(candidate.index);
+      if (!item) continue;
+      item.reasons = Array.isArray(candidate.reasons) ? candidate.reasons : [];
+      item.missing = Array.isArray(candidate.missing) ? candidate.missing : [];
+      state.reviewQueue.push(item);
+    }
+    if (state.reviewQueue.length === 0) return;
+    state.review.pending = true;
+    scheduleReview(REVIEW_DEBOUNCE_MS);
+  }
+
+  /** @param {number} delay */
+  function scheduleReview(delay) {
+    if (state.reviewTimer || state.reviewInFlight) return;
+    state.reviewTimer = setTimeout(() => {
+      state.reviewTimer = 0;
+      void flushReview();
+    }, delay);
+  }
+
+  /** 页面上下文：只带标题与 URL，域名/类型由 background 推导 */
+  function pageContext() {
+    return {
+      title: typeof document.title === 'string' ? document.title : '',
+      url: typeof location !== 'undefined' && location.href ? location.href : '',
+    };
+  }
+
+  /**
+   * 同一时间只允许一个 review.run 在飞；多个批次用防抖合并。
+   * 响应回来先比对 generation，晚到的一律丢弃。
+   */
+  async function flushReview() {
+    if (state.reviewInFlight || state.reviewQueue.length === 0) return;
+    if (!state.pageToken) return;
+
+    state.reviewInFlight = true;
+    const generation = state.generation;
+    const batch = state.reviewQueue.splice(0, REVIEW_QUEUE_MAX);
+
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'review.run',
+        pageToken: state.pageToken,
+        target: state.target,
+        targetCode: state.targetCode,
+        context: pageContext(),
+        items: batch.map((item) => ({
+          id: item.id,
+          source: item.source,
+          primary: item.primary,
+          reasons: item.reasons,
+          missing: item.missing,
+          ...(item.prev ? { prev: item.prev } : {}),
+          ...(item.next ? { next: item.next } : {}),
+        })),
+      });
+      // 还原 / 重新翻译后，旧响应不能再写回 DOM
+      if (generation !== state.generation) return;
+      if (!res) throw new Error('扩展后台没有响应');
+      if (!res.ok) throw new Error(res.error || '审校失败');
+
+      if (res.review?.failed) state.review.failed = true;
+      if (res.review?.truncated) state.review.truncated = true;
+      state.review.reviewed += Number(res.review?.reviewed) || batch.length;
+      applyCorrections(batch, res);
+      state.reviewAttempts = 0;
+    } catch (err) {
+      if (generation !== state.generation) return;
+      if (state.reviewAttempts < 1) {
+        // 只退避重试一次；仍失败就保留主译文结束本次审校
+        state.reviewAttempts += 1;
+        state.reviewQueue.unshift(...batch);
+        state.review.pending = true;
+        scheduleReview(REVIEW_RETRY_MS);
+        return;
+      }
+      state.review.failed = true;
+      state.reviewAttempts = 0;
+      console.warn('[sopen-translate] 审校失败，保留主译文', err);
+    } finally {
+      if (generation === state.generation) {
+        state.reviewInFlight = false;
+        state.review.pending = state.reviewQueue.length > 0;
+        if (state.reviewQueue.length > 0) scheduleReview(REVIEW_RETRY_MS);
+      }
+    }
+  }
+
+  /**
+   * @param {import('../types').ReviewRunItem[]} batch
+   * @param {any} res
+   */
+  function applyCorrections(batch, res) {
+    /** @type {Map<string, string>} */
+    const corrections = new Map();
+    for (const entry of Array.isArray(res?.corrections) ? res.corrections : []) {
+      const id = String(entry?.id ?? '');
+      const corrected = String(entry?.corrected ?? '');
+      if (id && corrected.trim()) corrections.set(id, corrected.trim());
+    }
+    /** @type {Map<string, string>} */
+    const rejected = new Map();
+    for (const entry of Array.isArray(res?.rejected) ? res.rejected : []) {
+      const id = String(entry?.id ?? '');
+      const reason = String(entry?.reason ?? '');
+      if (id && reason) rejected.set(id, reason);
+    }
+
+    for (const item of batch) {
+      const corrected = corrections.get(item.id) ?? null;
+      /** @type {string | null} */
+      let rejectedReason = null;
+      let applied = false;
+      if (corrected) {
+        applied = patchSegment(item.id, corrected);
+        if (!applied) rejectedReason = 'detached';
+      } else {
+        rejectedReason = rejected.get(item.id) || 'unchanged';
+      }
+      if (applied) state.review.corrected += 1;
+
+      state.reviewLog.push({
+        id: item.id,
+        source: item.source,
+        primary: item.primary,
+        corrected,
+        reasons: item.reasons,
+        applied,
+        rejectedReason,
+      });
+      if (state.reviewLog.length > REVIEW_LOG_MAX) state.reviewLog.shift();
+    }
+  }
+
+  /**
+   * 按 id 找 DOM 目标并打补丁。节点断开 / SPA 重渲染时返回 false，不报错。
+   * @param {string} id
+   * @param {string} corrected
+   * @returns {boolean}
+   */
+  function patchSegment(id, corrected) {
+    const target = state.reviewTargets.get(id);
+    if (!target) return false;
+
+    if (target.kind === 'text') {
+      const node = target.node;
+      if (node.isConnected === false) return false;
+      const current = node.nodeValue || '';
+      if (!current.trim()) return false;
+      if (corrected.trim() === current.trim()) return false;
+      node.nodeValue = current.replace(current.trim(), corrected.trim());
+      target.appliedFull = node.nodeValue;
+      return true;
+    }
+
+    const chunks = state.blockTranslations.get(target.el);
+    if (!chunks) return false;
+    // 只要还有空分片就说明整块译文不完整，不能把半截译文插进页面
+    if (chunks.some((chunk) => !String(chunk ?? '').trim())) return false;
+    chunks[target.chunkIndex] = corrected;
+    const text = joinChunks(chunks).trim();
+    if (!text) return false;
+
+    let span = state.blockSpans.get(target.el);
+    if (!span || span.isConnected === false) {
+      if (target.el.isConnected === false) return false;
+      // 原本因“译文=原文”没插入的块，修正后可以插入了
+      if (text === (state.blockSources.get(target.el) || '').trim()) return false;
+      span = document.createElement('span');
+      span.className = 'sopen-translated-block';
+      span.setAttribute('data-sopen-translated', '');
+      span.style.display = 'block';
+      span.textContent = text;
+      if (typeof target.el.append === 'function') target.el.append(span);
+      else target.el.appendChild(span);
+      state.injected.push(span);
+      state.blockSpans.set(target.el, span);
+      return true;
+    }
+
+    span.textContent = text;
+    return true;
+  }
+
+  /** @returns {{ reviewed: number, corrected: number, rejected: number, failed: boolean, truncated: boolean, pending: boolean }} */
+  function reviewSummary() {
+    return {
+      reviewed: state.review.reviewed,
+      corrected: state.review.corrected,
+      rejected: Math.max(0, state.review.reviewed - state.review.corrected),
+      failed: state.review.failed,
+      truncated: state.review.truncated,
+      pending: state.review.pending,
+    };
+  }
+
+  /**
+   * 撤销本次审校：只把 applied 的条目换回主译文，不影响还原语义。
+   * @returns {{ ok: boolean, undone: number }}
+   */
+  function undoReview() {
+    let undone = 0;
+    for (const entry of state.reviewLog) {
+      if (!entry.applied) continue;
+      const target = state.reviewTargets.get(entry.id);
+      if (!target) continue;
+
+      if (target.kind === 'text') {
+        const node = target.node;
+        if (node.isConnected === false) continue;
+        if (target.appliedFull !== null && node.nodeValue !== target.appliedFull) continue;
+        node.nodeValue = target.primaryFull;
+        target.appliedFull = null;
+        entry.applied = false;
+        undone += 1;
+        continue;
+      }
+
+      const chunks = state.blockTranslations.get(target.el);
+      if (!chunks) continue;
+      chunks[target.chunkIndex] = entry.primary;
+      const text = joinChunks(chunks).trim();
+      const span = state.blockSpans.get(target.el);
+      if (span && span.isConnected !== false) span.textContent = text;
+      entry.applied = false;
+      undone += 1;
+    }
+    state.review.corrected = Math.max(0, state.review.corrected - undone);
+    return { ok: true, undone };
   }
 
   /* ------------------------------- 纯译文 ------------------------------- */
@@ -818,7 +1149,7 @@
   /**
    * @param {Text[]} nodes
    * @param {{ scrolling?: boolean, policy?: Policy }} [options]
-   * @returns {Promise<{ translated: number, failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean, truncated: boolean }, remaining: Text[] }>}
+   * @returns {Promise<{ translated: number, failed: number, protected: number, warnings: number, stopped: boolean, remaining: Text[] }>}
    */
   async function runTextPass(nodes, { scrolling = false, policy: policyOverride } = {}) {
     if (nodes.length === 0) {
@@ -831,25 +1162,36 @@
     let translated = 0;
     let protectedCount = 0;
     let warnings = 0;
-    let reviewed = 0;
-    let corrected = 0;
-    let reviewFailed = false;
-    let reviewTruncated = false;
 
     /** @param {Text[]} batch */
     const worker = async (batch) => {
       showToast(progressText(scrolling));
+      const texts = batch.map((node) => (node.nodeValue || '').trim());
       try {
-        const result = await requestTranslate(batch.map((node) => (node.nodeValue || '').trim()));
+        const result = await requestTranslate(texts);
         protectedCount += result.protected;
         warnings += result.warnings.length;
-        if (result.review) {
-          reviewed += result.review.reviewed;
-          corrected += result.review.corrected;
-          reviewFailed = reviewFailed || result.review.failed;
-          reviewTruncated = reviewTruncated || result.review.truncated;
-        }
         translated += applyTextTranslations(batch, result.translations);
+        enqueueReviewCandidates(result.reviewCandidates, (index) => {
+          const node = batch[index];
+          if (!node || node.isConnected === false) return null;
+          const id = textId(node);
+          state.reviewTargets.set(id, {
+            kind: 'text',
+            node,
+            primaryFull: node.nodeValue || '',
+            appliedFull: null,
+          });
+          return {
+            id,
+            source: texts[index],
+            primary: String(result.translations[index] ?? '').trim(),
+            reasons: [],
+            missing: [],
+            ...(index > 0 ? { prev: texts[index - 1] } : {}),
+            ...(index + 1 < texts.length ? { next: texts[index + 1] } : {}),
+          };
+        });
       } finally {
         state.progress.done = Math.min(
           state.progress.total,
@@ -889,7 +1231,6 @@
       protected: protectedCount,
       warnings,
       stopped: first.stopped,
-      review: reviewed > 0 || reviewFailed ? { reviewed, corrected, failed: reviewFailed, truncated: reviewTruncated } : undefined,
       remaining,
     };
   }
@@ -899,7 +1240,7 @@
   /**
    * @param {Block[]} blocks
    * @param {{ scrolling?: boolean, policy?: Policy }} [options]
-   * @returns {Promise<{ translated: number, failed: number, protected: number, warnings: number, stopped: boolean, review?: { reviewed: number, corrected: number, failed: boolean, truncated: boolean }, remaining: Block[] }>}
+   * @returns {Promise<{ translated: number, failed: number, protected: number, warnings: number, stopped: boolean, remaining: Block[] }>}
    */
   async function runBlockPass(blocks, { scrolling = false, policy: policyOverride } = {}) {
     if (blocks.length === 0) {
@@ -921,10 +1262,6 @@
     const translations = new Array(segments.length).fill('');
     let protectedCount = 0;
     let warnings = 0;
-    let reviewed = 0;
-    let corrected = 0;
-    let reviewFailed = false;
-    let reviewTruncated = false;
 
     /** @param {{ items: { text: string }[], offset: number }} job */
     const worker = async (job) => {
@@ -936,12 +1273,30 @@
         });
         protectedCount += result.protected;
         warnings += result.warnings.length;
-        if (result.review) {
-          reviewed += result.review.reviewed;
-          corrected += result.review.corrected;
-          reviewFailed = reviewFailed || result.review.failed;
-          reviewTruncated = reviewTruncated || result.review.truncated;
-        }
+        enqueueReviewCandidates(result.reviewCandidates, (index) => {
+          const globalIndex = job.offset + index;
+          const segment = segments[globalIndex];
+          if (!segment) return null;
+          const block = blocks[segment.blockIndex];
+          if (!block || block.el.isConnected === false) return null;
+          const id = `${blockId(block.el)}:${segment.chunkIndex}`;
+          state.reviewTargets.set(id, {
+            kind: 'block',
+            el: block.el,
+            chunkIndex: segment.chunkIndex,
+          });
+          const prev = globalIndex > 0 ? segments[globalIndex - 1]?.text : undefined;
+          const next = globalIndex + 1 < segments.length ? segments[globalIndex + 1]?.text : undefined;
+          return {
+            id,
+            source: segment.text,
+            primary: String(result.translations[index] ?? '').trim(),
+            reasons: [],
+            missing: [],
+            ...(prev ? { prev } : {}),
+            ...(next ? { next } : {}),
+          };
+        });
       } finally {
         state.progress.done = Math.min(
           state.progress.total,
@@ -970,7 +1325,6 @@
       protected: protectedCount,
       warnings,
       stopped: first.stopped,
-      review: reviewed > 0 || reviewFailed ? { reviewed, corrected, failed: reviewFailed, truncated: reviewTruncated } : undefined,
       remaining: applied.remaining,
     };
   }
@@ -1273,6 +1627,8 @@
       const page = await readPageSettings();
       state.mode = page.mode;
       state.scope = page.scope;
+      state.target = page.target;
+      state.targetCode = page.targetCode;
 
       const result =
         state.scope === 'whole' ? await translateWhole() : await translateViewportFirst();
@@ -1307,6 +1663,12 @@
       case 'page.restore':
         sendResponse(restorePage());
         return false;
+      case 'page.review':
+        sendResponse({ ok: true, log: state.reviewLog.slice(), summary: reviewSummary() });
+        return false;
+      case 'page.review.undo':
+        sendResponse(undoReview());
+        return false;
       case 'page.status':
         sendResponse({
           ok: true,
@@ -1316,6 +1678,13 @@
           scope: state.scope,
           pending: state.pending,
           progress: state.progress,
+          review: {
+            pending: state.review.pending,
+            reviewed: state.review.reviewed,
+            corrected: state.review.corrected,
+            failed: state.review.failed,
+            truncated: state.review.truncated,
+          },
         });
         return false;
       default:
