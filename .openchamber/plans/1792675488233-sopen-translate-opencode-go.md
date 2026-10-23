@@ -32,14 +32,16 @@
 | E5 | `content.js`、`popup.*` | `smoke:dom` + 手工 |
 | E6 | `scripts/dom-smoke.mjs` | 三套命令 + 四页真机 |
 | F1 | `types.d.ts`、`lib/protocols.js`、`lib/provider-presets.js`、`lib/languages.js`、`options.*` | `check` + `smoke` |
+| F1c | `lib/provider-presets.js`、`lib/reasoning.js`、`options.*` | `check` + 本地代理真机 |
 | F2 | 建议新建 `lib/review.js`（纯函数）或放 `providers.js` | `smoke` 规则用例 |
 | F3 | `lib/providers.js`、`background.js`、`lib/settings.js`、`options.*` | `smoke` + Edge 真机 |
 | F4 | `options.*` | 手工 |
 | F5 | `scripts/smoke.mjs` | 四页 A/B |
 
 **F 的 key 前提**：`microsoft-edge` 走 Edge 内置翻译接口，**不需要 key**，F5 可以直接真机跑；
+`index-translate` 也不需要 key，但浏览器直连 412，需要本地代理；
 `microsoft-azure` 才需要 key + region，没有 key 时只实现 + stub，标「接口未实测」。
-Edge 是内部接口，可能随时失效，别把产品只押在它上面。
+Edge 是内部接口，Index-Translate 是公网免费接口，都可能随时失效，别把产品只押在其中一条上。
 
 ### 现有实现的关键参数（别照旧文档改回去）
 
@@ -103,6 +105,7 @@ Edge 是内部接口，可能随时失效，别把产品只押在它上面。
 - [ ] E5 UI 与状态：popup 范围切换、动态进度、toast 文案
 - [ ] E6 验收：假 DOM + 四页真机（首屏时间 / 滚动覆盖率 / 还原）
 - [ ] F1 微软翻译：`microsoft-edge`（无 key）+ `microsoft-azure`（可选）+ 语言码映射
+- [ ] F1c B 站 Index-Translate（免费）：本地代理预设 + 公网直连 412 说明
 - [ ] F2 规则筛可疑段：术语 / 空译 / 长度比 / 脚本 / 占位符 / 重复
 - [ ] F3 可选 AI 定点修正：第二 provider，只审可疑段、返回修正译文
 - [ ] F4 设置页：微软 `region` + 「审校服务」下拉 + 隐私说明
@@ -124,6 +127,7 @@ Edge 是内部接口，可能随时失效，别把产品只押在它上面。
 | DeepL | 无需选模型 | ✅ key 已验证，字符额度 0/1,000,000 |
 | Microsoft Edge 翻译（免费） | 无需 key | 阶段 F 默认；Edge 内部接口，可能失效/限流 |
 | Microsoft Azure Translator | 无需选模型 | 可选；需要 key + region，F0 2M 字符/小时 |
+| B 站 Index-Translate（免费） | `Index-Translate-35B-A3B` | 公网 API 免 key；**浏览器直连 412**，需本地代理 `127.0.0.1:8080` |
 
 其它约束：
 
@@ -1619,6 +1623,8 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 改成：**MT 打底 → 规则筛可疑段 → 只让 LLM 修正可疑段并直接返回译文**。不阻塞首屏，不做评分仪表盘。
 
 微软侧默认用 Edge 内置免费接口（无需 key，KISS 同款）；Azure 官方作为可选稳定版。
+另有 **B 站 Index-Translate**（Apache-2.0，公网 API 免 key）可作为免费 LLM 主翻译，但浏览器直连被 WAF 拦（412），
+需要用户本地跑 `call_api.py --serve` 代理。
 
 非目标：全量 AI 评分、评分 UI、Custom Translator 训练、把 MT 当术语表。
 
@@ -1650,6 +1656,21 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
   本项目取保守值 **5,000 字符 / 100 段/请求**，并发 4，超时 30s。
 - `ProviderConfig` 增加可选 `region`；设置页只在 Azure 预设显示该字段。
 - 需要 Azure key；没有 key 时只实现 + stub，标「接口未实测」，不影响 Edge 免费接口的验收。
+
+### F1c `index-translate`（B 站 Index-Translate，免费）
+
+- 模型：`Index-Translate-35B-A3B`（也提供 9B / 2B）；Apache-2.0；文本覆盖约 150 种语言。
+- 公网 API：`https://index-translate.bilibili.com/v1`，OpenAI 兼容（`/chat/completions`、`/responses`），**无需 key**。
+- 实测（Node，2026-10-23）：2 段中译约 0.6–0.75s，`response_format: json_object` 可用，默认不输出 reasoning。
+- **浏览器/扩展直连会被 WAF 拦**：从扩展页面 `fetch` 返回 **412**，换正常 UA 仍 412；
+  这与 README 的“浏览器插件要走本地代理（CORS/请求头限制）”一致。
+  - 推荐：预设 `baseUrl = http://127.0.0.1:8080/v1`，用户自行运行仓库里的
+    `python inference/llm/call_api.py --serve`；`apiKey` 可填任意值（如 `index`）。
+  - 公网直连 `https://index-translate.bilibili.com/v1` 保留为可选，标记“可能 412 / 接口未实测”，不做默认。
+- 建议做成「Index-Translate（本地代理）」一条预设；`supportsModelList:false`、`verified:false`（代理路径未真机跑过）、`apiKey` 可空。
+- 思考：实测默认无 reasoning；如果后续模型版本开始输出，再按 `enable_thinking:false`（README 也建议浏览器侧关闭）。
+- 限额/SLA：公网免费接口未公布额度，可能限流/变更；本地代理仍然依赖这个公网接口，不是离线。
+- 它是 LLM（不是 MT）：可直接当主翻译；速度/成本介于 MT 与付费 LLM 之间，术语仍靠 F2/F3。
 
 ### 共同
 
@@ -1707,6 +1728,7 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 - 混排（一段 MT、一段修正）语气可能不一致；双语模式同屏可见。
 - 多一个第三方数据流向；设置页和 README 要写清楚。
 - 第二 provider 的选择/存储/还原语义比单 provider 复杂，先做同步审校，异步补丁另开一步。
+- Index-Translate 公网接口对浏览器/扩展返回 412（WAF），必须本地代理；免费额度与稳定性无保障，不能当唯一主翻译。
 
 ---
 
