@@ -192,6 +192,7 @@ export function summarizeSettings(settings) {
   const providers = Array.isArray(settings.providers) ? settings.providers : [];
   const active = providers.find((provider) => provider.id === settings.activeProviderId);
   return {
+    providerCount: providers.length,
     targetLang: settings.targetLang,
     targetLangCode: settings.targetLangCode,
     displayMode: settings.displayMode,
