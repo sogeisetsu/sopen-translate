@@ -1053,6 +1053,8 @@
     } finally {
       if (generation === state.generation) {
         state.reviewInFlight = false;
+        // 预算已满：后面的候选不再逐批发无用请求
+        if (state.review.truncated) state.reviewQueue = [];
         state.review.pending = state.reviewQueue.length > 0;
         if (state.reviewQueue.length > 0) scheduleReview(REVIEW_RETRY_MS);
       }
@@ -1194,7 +1196,16 @@
       chunks[target.chunkIndex] = entry.primary;
       const text = joinChunks(chunks).trim();
       const span = state.blockSpans.get(target.el);
-      if (span && span.isConnected !== false) span.textContent = text;
+      if (span && span.isConnected !== false) {
+        // 主译文本身等于原文：撤销后不应留下重复的译文块
+        if (text === (state.blockSources.get(target.el) || '').trim()) {
+          if (typeof span.remove === 'function') span.remove();
+          else span.parentElement?.removeChild?.(span);
+          state.blockSpans.delete(target.el);
+        } else {
+          span.textContent = text;
+        }
+      }
       entry.applied = false;
       undone += 1;
     }

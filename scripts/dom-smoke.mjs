@@ -1242,6 +1242,32 @@ await test('调试日志：开启 samples 才附带 120 字以内的样本', asy
   assert.equal(review.sample.primary, '中:Kubernetes runs containers.');
 });
 
+await test('异步审校：多批候选在防抖窗口内合并成一次 review.run', async () => {
+  await resetPageStub();
+  const paragraphs = [];
+  for (let index = 0; index < 60; index += 1) {
+    paragraphs.push(el('p', `Kubernetes paragraph number ${index}.`));
+  }
+  resetBody(...paragraphs);
+  responder = (texts) => ({
+    ok: true,
+    translations: texts.map((text) => `中:${text}`),
+    protected: 0,
+    warnings: [],
+    reviewCandidates: texts.map((_, index) => ({
+      index,
+      reasons: ['term'],
+      missing: ['Kubernetes'],
+    })),
+  });
+
+  await send({ type: 'page.translate' });
+  await waitFor(() => reviewCalls.length > 0);
+  await sleep(700);
+  assert.equal(reviewCalls.length, 1, '两批候选应合并成一次请求');
+  assert.equal(reviewCalls[0].items.length, 60);
+});
+
 if (failures > 0) {
   console.log(`\n${failures} 个用例失败`);
   process.exit(1);

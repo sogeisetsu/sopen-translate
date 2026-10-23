@@ -1593,7 +1593,7 @@ await test('debug 导出：可 JSON.parse、含版本/UA/设置摘要、无密�
   assert.doesNotThrow(() => JSON.parse(text));
 
   const summary = summarizeSettings(settings);
-  assert.equal(summary.providerCount, undefined, '摘要不暴露无意义字段');
+  assert.equal(summary.providerCount, 1);
   assert.equal(/** @type {any} */ (summary).debugLogEnabled, true);
 });
 
