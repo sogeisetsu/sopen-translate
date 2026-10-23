@@ -102,7 +102,7 @@
 | NVIDIA NIM · MiniMax M3.1 Flash | OpenAI Chat | 已实测（`{segments}` + `reasoning_effort=none`） |
 | NVIDIA Riva Translate | nvidia-riva | 已实测（语言对 system；1 段/请求） |
 | Google 1（网页接口） | google-free | 接口未实测（无需 key；单条请求，本机出口常 429） |
-| Google 2（translate-pa） | google-pa | 已实测（批量 POST；需要你自己的 `X-Goog-API-Key`） |
+| Google 2（translate-pa） | google-pa | 已实测（批量 POST；需要 `X-Goog-API-Key`，可点按钮临时填入公共 key） |
 | Microsoft Azure Translator | Microsoft Azure | 接口未实测（需要 key + Region） |
 | Index-Translate（本地代理） | OpenAI Chat | 接口未实测（需要本地代理） |
 | OpenAI / DeepSeek / Kimi / 智谱 / 阿里百炼 / MiniMax / OpenRouter / 硅基流动 | OpenAI Chat | 接口未实测 |
@@ -141,7 +141,7 @@
 | 适用 | 快速试一下、没有 key | 需要稳定批量翻译，且有 Google API key |
 
 - 两个预设都跳过术语层（MT 没有 prompt 通道）。
-- **Google 2 的 key 要你自己填**：扩展不内置第三方公共 key，避免把别人的凭据写进仓库；KISS Translator 等项目的公共 key 可以自行决定是否使用。
+- **Google 2 的 key**：可以点「使用公共测试 key」，扩展会从 KISS Translator 的公开源码临时读取并填入当前草稿（不写进仓库、可能随时失效）；也可以填你自己的 Google API key。
 - Google 2 的协议名是 `google-pa`，预设页会显示请求地址与 `X-Goog-API-Key` 说明；Google 1 的协议名是 `google-free`。
 - 两者都会把页面文本发给 Google；不需要联网的端侧方案是「Chrome 内置翻译」。
 
@@ -210,7 +210,7 @@ flowchart LR
 
 ## 隐私与数据流向
 
-- **密钥**：只存在本机 `chrome.storage.local`，只有 service worker 读取；content script 看不到，不上传、不写日志、不导出。
+- **密钥**：只存在本机 `chrome.storage.local`，只有 service worker 读取；content script 看不到，不上传、不写日志、不导出。Google 2 的「公共测试 key」只在点击时从 KISS 公开源码读取并填入草稿，不写进仓库或日志。
 - **页面文本**：发给**你当前启用的主翻译服务**。具体厂商取决于预设：
   - LLM 预设：文本 + prompt 发给对应 API；
   - DeepL / Azure / NVIDIA：发给对应厂商；
@@ -244,7 +244,7 @@ flowchart LR
 ：非官方网页接口，出口 IP 被限流；换网络/代理，或改用 Google 2 / DeepL / 微软 / 自建服务。
 
 **Google 2 提示缺少 X-Goog-API-Key**
-：Google 2 需要你自己的 Google API key；到 Google Cloud 控制台启用 Translation 相关 API 后，把 key 填进服务卡片。扩展不内置第三方 key。
+：点服务卡片里的「使用公共测试 key」临时填入（来自 KISS Translator 公开源码，可能随时失效），或到 Google Cloud 控制台启用 Translation 相关 API 后填自己的 key。扩展不把第三方 key 写进仓库。
 
 **审校没有反应**
 ：审校只对 MT 主翻译生效；LLM 主翻译会直接返回 `reviewSkipped = "llm-primary"`。另外没有可疑段时不会发请求。

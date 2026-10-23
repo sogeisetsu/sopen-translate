@@ -111,7 +111,7 @@ MV3 整页翻译扩展。`extension/` 就是可加载产物：无打包、无运
 - `response_format` 回退只在 400/404/422；401/403/429 直接上抛，否则一次 429 会变成 8 次请求。
 - Microsoft Edge 是浏览器内部接口：`POST /translate/translatetext?...`，body 是**纯字符串数组**，没有 Authorization；Azure 是 `[{ Text }]` + `Ocp-Apim-Subscription-Key`（区域资源还要 `Ocp-Apim-Subscription-Region`）。两者响应同形，别把 body 混用。
 - Google 1（`google-free`）一次只能发一个 `q`，长文本按 ≤1600 字符切开串行请求；本机出口实测可达但返回 429，预设只做 stub、不做默认。
-- Google 2（`google-pa`）是 `POST https://translate-pa.googleapis.com/v1/translateHtml`：`Content-Type: application/json+protobuf` + `X-Goog-API-Key`，body 为 `[[texts, from, to], "wt_lib"]`，响应为 `[[translations], [langs]]`。需要用户自己的 key，**不要**把 KISS Translator 等项目的公共 key 内置进仓库。
+- Google 2（`google-pa`）是 `POST https://translate-pa.googleapis.com/v1/translateHtml`：`Content-Type: application/json+protobuf` + `X-Goog-API-Key`，body 为 `[[texts, from, to], "wt_lib"]`，响应为 `[[translations], [langs]]`。设置页的「使用公共测试 key」按钮会从 KISS Translator 公开源码临时读取并填入草稿，**不要把 key 写进仓库**；也可以让用户填自己的 key。
 - 双语会跳过含 `PRE/CODE/KBD/SAMP/...` 后代的块（含内联 `<code>`），这是有意的覆盖率损失。
 - 视口判定的 rect 全 0 视为隐藏/未布局；`smoke:dom` 的假 DOM 默认给可见 rect，测视口用例时用 `offscreen(el)` 设置元素 rect。
 - `smoke:dom` 的 `window` / `document` 事件与 `MutationObserver` 都是桩：要触发续翻，用 `fireListener(windowListeners, 'scroll')` 或 `fireMutations(...)`。

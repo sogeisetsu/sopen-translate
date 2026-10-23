@@ -26,6 +26,43 @@ import { initTips } from './lib/ui-tip.js';
 
 const MODELS_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * Google 2 的公共测试 key 不在仓库里。点击「使用公共测试 key」时从 KISS Translator
+ * 的公开源码临时读取，填进当前草稿；不落盘、不写进仓库，key 失效时回退为手动填写。
+ */
+const GOOGLE_PUBLIC_KEY_SOURCES = [
+  'https://raw.githubusercontent.com/fishjar/kiss-translator/dev/src/builtin-plugins/presets.js',
+  'https://raw.githubusercontent.com/fishjar/kiss-translator/dev/src/config/api.js',
+];
+/** @type {string | null} */
+let publicGoogleKeyCache = null;
+
+/** @returns {Promise<string>} */
+async function fetchPublicGoogleKey() {
+  if (publicGoogleKeyCache) return publicGoogleKeyCache;
+  for (const source of GOOGLE_PUBLIC_KEY_SOURCES) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(source, { cache: 'no-store', signal: controller.signal });
+      if (!res.ok) continue;
+      const text = await res.text();
+      const match = text.match(
+        /\[OPT_TRANS_GOOGLE_2\][\s\S]{0,400}?key:\s*["']([^"']+)["']/,
+      );
+      const key = String(match?.[1] ?? '').trim();
+      if (!/^AIza[\w-]{20,}$/.test(key)) continue;
+      publicGoogleKeyCache = key;
+      return key;
+    } catch {
+      /* 换下一个来源 */
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error('公共测试 key 获取失败');
+}
+
 /** 文件直开 / 非扩展上下文没有 chrome.storage.local，整页降级而不是抛原始异常 */
 const storageAvailable = Boolean(globalThis.chrome?.storage?.local);
 
@@ -829,6 +866,14 @@ function providerCard(provider, index) {
           dataset: { action: 'prepare-builtin', index },
         })
       : null,
+    isGooglePa
+      ? h('button', {
+          class: 'btn small ghost',
+          type: 'button',
+          text: '使用公共测试 key',
+          dataset: { action: 'fill-google-key', index },
+        })
+      : null,
     h('button', {
       class: 'btn small',
       type: 'button',
@@ -859,7 +904,7 @@ function providerCard(provider, index) {
   const googlePaNote = isGooglePa
     ? h('p', {
         class: 'provider-note',
-        text: 'Google 2 走 translate-pa 批量接口，需要你自己的 X-Goog-API-Key；Google 1 是无需 key 的单条网页接口，容易被 429。',
+        text: 'Google 2 走 translate-pa 批量接口，需要 X-Goog-API-Key；可点「使用公共测试 key」临时填入（来自 KISS Translator 公开源码，可能随时失效）。Google 1 是无需 key 的单条网页接口，容易被 429。',
       })
     : null;
   const googleFreeNote = isGoogleFree
@@ -1494,6 +1539,34 @@ providersEl.addEventListener('click', async (event) => {
 
   if (button.dataset.action === 'refresh-models') {
     await refreshModels(index);
+    return;
+  }
+
+  if (button.dataset.action === 'fill-google-key') {
+    const result = /** @type {HTMLElement | null} */ (
+      button.parentElement?.querySelector('.result') ?? null
+    );
+    const card = /** @type {HTMLElement | null} */ (button.closest('.provider'));
+    const input = /** @type {HTMLInputElement | null} */ (
+      card?.querySelector('input[data-field="apiKey"]') ?? null
+    );
+    if (!result || !input) return;
+
+    result.classList.remove('is-error');
+    result.textContent = '正在获取公共测试 key…';
+    button.disabled = true;
+    try {
+      const key = await fetchPublicGoogleKey();
+      input.value = key;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      result.textContent = '已填入公共测试 key（来自 KISS 公开源码，可能随时失效）';
+      markDirty('已填入公共测试 key，记得保存');
+    } catch {
+      result.textContent = '获取公共测试 key 失败，请自行填写 Google API Key';
+      result.classList.add('is-error');
+    } finally {
+      button.disabled = false;
+    }
     return;
   }
 

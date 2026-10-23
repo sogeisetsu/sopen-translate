@@ -96,6 +96,7 @@ scripts/
 
 - 仓库任何文件都不准出现真实 key / token / 密码 / 邮箱。仓库是公开的。
 - 密钥只允许在运行时 `chrome.storage.local`，或 OpenChamber 环境变量（仓库外的 `.config/openchamber/environment.json`）。
+- Google 2 的「使用公共测试 key」只在用户点击时从 KISS Translator 的公开源码读取并填入草稿；不写进仓库、日志或导出文件。
 - 冒烟测试一律 stub `fetch`，不联网、不需要 key。
 - 调试日志导出前统一脱敏；关闭「记录翻译样本」时不写页面正文。
 
