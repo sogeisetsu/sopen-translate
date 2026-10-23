@@ -574,6 +574,29 @@ await test('并发：多批同时在飞，结果仍按原文顺序写回', async
   assert.equal(paragraphs[119].textContent, '中:word119');
 });
 
+await test('失败补跑：失败批串行重试一次后补齐', async () => {
+  await resetPageStub();
+  const paragraphs = Array.from({ length: 120 }, (_, i) => el('p', `word${String(i).padStart(3, '0')}`));
+  resetBody(...paragraphs);
+
+  responder = (texts, call) => {
+    if (call === 2) return new Error('429');
+    return {
+      ok: true,
+      translations: texts.map((text) => `中:${text}`),
+      protected: 0,
+      warnings: [],
+    };
+  };
+
+  const result = await send({ type: 'page.translate' });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.failed, 0, '补跑成功后不应再计失败');
+  assert.equal(result.translated, 120);
+  assert.equal(calls, 4, '3 批 + 1 次补跑');
+  assert.equal(paragraphs[119].textContent, '中:word119');
+});
+
 await test('熔断：连续 3 批失败后停止，保留已翻部分', async () => {
   await resetPageStub();
   // 每段约 48 字符、每批 50 段 → 240 段 = 5 批；并发 4 会先起飞前 4 批

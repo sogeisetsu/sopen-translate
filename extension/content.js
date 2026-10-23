@@ -45,6 +45,8 @@
   const MIN_TEXT_LEN = 2;
   const MAX_SEGMENT_CHARS = 1200;
   const MAX_CONSECUTIVE_FAILURES = 3;
+  /** 失败批补跑的并发：主趟结束后限流通常已冷却 */
+  const RETRY_CONCURRENCY = 2;
   const LEAF_CONTAINER_MIN_CHARS = 40;
 
   const state = {
@@ -100,8 +102,8 @@
       const status = await chrome.runtime.sendMessage({ type: 'status' });
       const active = status?.active;
       if (active?.protocol === 'deepl') return { chars: 3000, items: 50, concurrency: 4 };
-      if (active?.presetId === 'sensenova') return { chars: 4000, items: 200, concurrency: 1 };
-      return { chars: 4000, items: 200, concurrency: 4 };
+      if (active?.presetId === 'sensenova') return { chars: 6000, items: 300, concurrency: 1 };
+      return { chars: 8000, items: 400, concurrency: 8 };
     } catch {
       return { chars: BATCH_CHARS, items: BATCH_ITEMS, concurrency: 4 };
     }
@@ -111,18 +113,23 @@
    * 有限并发执行批次；顺序由调用方按 index 写回，不依赖完成顺序。
    * - 第 0 批失败立即中止（多半是配置问题）
    * - 连续 3 批失败熔断，已完成的批次保留
+   * - 返回失败批的下标，调用方可以串行补跑一趟
    * @template T
    * @param {T[]} jobs
    * @param {(job: T, index: number) => Promise<void>} worker
    * @param {number} concurrency
-   * @returns {Promise<{ stopped: boolean }>}
+   * @param {{ abortOnFirst?: boolean }} [options]
+   * @returns {Promise<{ stopped: boolean, failed: number[], unrun: number[] }>}
    */
-  async function runPool(jobs, worker, concurrency) {
+  async function runPool(jobs, worker, concurrency, { abortOnFirst = true } = {}) {
     let next = 0;
     let consecutiveFailures = 0;
     let stopped = false;
     /** @type {unknown} */
     let firstError = null;
+    /** @type {number[]} */
+    const failed = [];
+    const attempted = new Set();
 
     async function lane() {
       for (;;) {
@@ -130,12 +137,14 @@
         const index = next;
         next += 1;
         if (index >= jobs.length) return;
+        attempted.add(index);
         try {
           await worker(jobs[index], index);
           consecutiveFailures = 0;
         } catch (err) {
+          failed.push(index);
           consecutiveFailures += 1;
-          if (index === 0) {
+          if (abortOnFirst && index === 0) {
             stopped = true;
             firstError = err;
             return;
@@ -151,7 +160,12 @@
     const lanes = Math.max(1, Math.min(concurrency, jobs.length));
     await Promise.all(Array.from({ length: lanes }, lane));
     if (firstError) throw firstError;
-    return { stopped };
+    /** @type {number[]} */
+    const unrun = [];
+    for (let index = 0; index < jobs.length; index += 1) {
+      if (!attempted.has(index)) unrun.push(index);
+    }
+    return { stopped, failed: failed.sort((a, b) => a - b), unrun };
   }
 
   /* --------------------------------- 状态条 -------------------------------- */
@@ -599,42 +613,52 @@
     const policy = await readPolicy();
     const batches = batchNodes(nodes, policy);
     let translated = 0;
-    let failed = 0;
     let protectedCount = 0;
     let warnings = 0;
 
     try {
-      const { stopped } = await runPool(
-        batches,
-        async (batch) => {
-          showToast(progressText());
-          try {
-            const result = await requestTranslate(
-              batch.map((node) => (node.nodeValue || '').trim()),
-            );
-            protectedCount += result.protected;
-            warnings += result.warnings.length;
-            translated += applyTextTranslations(batch, result.translations);
-            state.progress.done += batch.length;
-          } catch (err) {
-            failed += batch.length;
-            state.progress.done += batch.length;
-            throw err;
-          }
-        },
-        policy.concurrency,
-      );
+      /** @param {Text[]} batch */
+      const worker = async (batch) => {
+        showToast(progressText());
+        try {
+          const result = await requestTranslate(
+            batch.map((node) => (node.nodeValue || '').trim()),
+          );
+          protectedCount += result.protected;
+          warnings += result.warnings.length;
+          translated += applyTextTranslations(batch, result.translations);
+        } finally {
+          state.progress.done = Math.min(
+            state.progress.total,
+            state.progress.done + batch.length,
+          );
+        }
+      };
+
+      const first = await runPool(batches, worker, policy.concurrency);
+      let stillFailed = first.failed;
+      if (!first.stopped && stillFailed.length > 0) {
+        // 第二趟串行补跑：高并发下的 429 往往是瞬时的，冷却后能补回来
+        const retry = await runPool(
+          stillFailed.map((index) => batches[index]),
+          worker,
+          RETRY_CONCURRENCY,
+          { abortOnFirst: false },
+        );
+        stillFailed = [...retry.failed, ...retry.unrun].map((index) => stillFailed[index]);
+      }
+      const failed = stillFailed.reduce((sum, index) => sum + batches[index].length, 0);
 
       showToast(
         summaryText(`已翻译 ${translated} 段`, {
           failed,
           protected: protectedCount,
           warnings,
-          stopped,
+          stopped: first.stopped,
         }),
         { timeout: 3000 },
       );
-      return { ok: true, translated, failed, protected: protectedCount, stopped };
+      return { ok: true, translated, failed, protected: protectedCount, stopped: first.stopped };
     } catch (err) {
       showToast(`翻译失败：${errorText(err)}`, { error: true, timeout: 5000 });
       return { ok: false, error: errorText(err) };
@@ -663,31 +687,40 @@
     }
     /** @type {string[]} */
     const translations = new Array(segments.length).fill('');
-    let failed = 0;
     let protectedCount = 0;
     let warnings = 0;
 
     try {
-      const { stopped } = await runPool(
-        jobs,
-        async (job) => {
-          showToast(progressText());
-          try {
-            const result = await requestTranslate(job.items.map((segment) => segment.text));
-            result.translations.forEach((text, position) => {
-              translations[job.offset + position] = text;
-            });
-            protectedCount += result.protected;
-            warnings += result.warnings.length;
-            state.progress.done += job.items.length;
-          } catch (err) {
-            failed += job.items.length;
-            state.progress.done += job.items.length;
-            throw err;
-          }
-        },
-        policy.concurrency,
-      );
+      /** @param {{ items: { text: string }[], offset: number }} job */
+      const worker = async (job) => {
+        showToast(progressText());
+        try {
+          const result = await requestTranslate(job.items.map((segment) => segment.text));
+          result.translations.forEach((text, position) => {
+            translations[job.offset + position] = text;
+          });
+          protectedCount += result.protected;
+          warnings += result.warnings.length;
+        } finally {
+          state.progress.done = Math.min(
+            state.progress.total,
+            state.progress.done + job.items.length,
+          );
+        }
+      };
+
+      const first = await runPool(jobs, worker, policy.concurrency);
+      let stillFailed = first.failed;
+      if (!first.stopped && stillFailed.length > 0) {
+        const retry = await runPool(
+          stillFailed.map((index) => jobs[index]),
+          worker,
+          RETRY_CONCURRENCY,
+          { abortOnFirst: false },
+        );
+        stillFailed = [...retry.failed, ...retry.unrun].map((index) => stillFailed[index]);
+      }
+      const failed = stillFailed.reduce((sum, index) => sum + jobs[index].items.length, 0);
 
       const translated = applyBlockTranslations(blocks, segments, translations);
       showToast(
@@ -695,11 +728,11 @@
           failed,
           protected: protectedCount,
           warnings,
-          stopped,
+          stopped: first.stopped,
         }),
         { timeout: 3000 },
       );
-      return { ok: true, translated, failed, protected: protectedCount, stopped };
+      return { ok: true, translated, failed, protected: protectedCount, stopped: first.stopped };
     } catch (err) {
       showToast(`翻译失败：${errorText(err)}`, { error: true, timeout: 5000 });
       return { ok: false, error: errorText(err) };
