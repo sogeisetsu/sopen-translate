@@ -61,6 +61,11 @@
 - [ ] E4 续翻调度：scroll / resize / MutationObserver / visibilitychange，防重复
 - [ ] E5 UI 与状态：popup 范围切换、动态进度、toast 文案
 - [ ] E6 验收：假 DOM + 四页真机（首屏时间 / 滚动覆盖率 / 还原）
+- [ ] F1 微软翻译：`microsoft-translator` 协议 + 预设 + `region` + 语言码映射
+- [ ] F2 规则筛可疑段：术语 / 空译 / 长度比 / 脚本 / 占位符 / 重复
+- [ ] F3 可选 AI 定点修正：第二 provider，只审可疑段、返回修正译文
+- [ ] F4 设置页：微软 `region` + 「审校服务」下拉 + 隐私说明
+- [ ] F5 验收：真 key + 四页 A/B；收益不足就不上审校层
 
 ---
 
@@ -1552,6 +1557,81 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 
 ---
 
+# 阶段 F：微软翻译 + AI 定点修正（2026-10-23 评估，待拍板）
+
+## F0 结论与边界
+
+**可行，但不做“全量 MT + 全量 AI 评分”。** 全量审校会把 LLM 吞吐瓶颈请回来（Wikipedia 78k 字符至少分钟级），
+成本可能比 MT 贵一个数量级，而且无参考评分主观、会漂移。
+
+改成：**MT 打底 → 规则筛可疑段 → 只让 LLM 修正可疑段并直接返回译文**。不阻塞首屏，不做评分仪表盘。
+
+非目标：全量 AI 评分、评分 UI、Custom Translator 训练、把 MT 当术语表。
+
+## F1 微软翻译协议
+
+- `ProtocolId` 增加 `microsoft-translator`；预设增加「Microsoft Translator」（真 key 跑过之前标「接口未实测」）。
+- 请求：`POST {baseUrl}/translate?api-version=3.0&to=<msCode>`
+  - 头：`Ocp-Apim-Subscription-Key`、`Content-Type: application/json`；
+    区域/多服务资源还要 `Ocp-Apim-Subscription-Region`（global 单服务可空）。
+  - Body：`texts.map((text) => ({ Text: text }))`，响应按输入顺序取 `translations[0].text`。
+- 限额：官方单请求 50,000 字符 / 1,000 个元素；F0 免费 2M 字符/小时，S1 40M/小时，无并发数限制。
+  本项目取保守值：**5,000 字符 / 100 段/请求**，并发 4，超时 30s。
+- 语言代码映射：`ZH-HANS → zh-Hans`、`ZH-HANT → zh-Hant`、`EN-US → en`、`PT-BR → pt`，
+  `JA/KO/FR/DE/ES/RU` 转小写；未知值原样小写透传。
+- 术语：标准 API **不支持请求级词表**；MT 照常翻，术语由 F2 的规则校验发现，再由 F3 修正。
+- `ProviderConfig` 增加可选 `region`；设置页只在微软预设显示该字段。
+
+## F2 规则筛可疑段（不花 LLM token）
+
+对每段做确定性检查，产出 `{ index, reasons, missing }`：
+
+1. 术语命中但译文缺失（复用 `verifySegment`）；
+2. 空译文 / 与原文相同；
+3. 长度比异常（译文/原文 < 0.3 或 > 3，CJK 目标另设阈值）；
+4. 目标语种脚本不对（目标中文却无 CJK；目标拉丁语系却无拉丁字母）；
+5. 数字、URL、占位符数量变化；
+6. 相邻段完全重复。
+
+每页最多送审 **200 段 / 8,000 字符**；超出只取前 N 条并在结果里标记 `reviewTruncated`。
+
+## F3 AI 定点修正（可选，第二 provider）
+
+- 新增设置：`reviewProviderId: string | null`（从已配置的 LLM 里选；默认 `null` = 不审校）。
+- 流程：主翻译（MT）→ F2 筛出可疑段 → 一次 LLM 请求（不是每段一次），输入
+  `{ source, primary, reasons, missing }`，要求只返回 `{"segments":[{"index":n,"corrected":"..."}]}`。
+- 校验：index 必须在可疑段集合内、`corrected` 非空；长度/数量不符的条目丢弃；只替换通过校验的段。
+- LLM 失败/超时：保留 MT 译文，不整段回退；计入 `reviewFailed`。
+- 与现有 `enforcement` 的关系：`fallback/repair/warn` 仍作用于 MT 译文；审校是之后的一层，不改变主策略。
+- 首屏：F3 MVP 同步执行（只审可疑段，通常很少）；如果实测拖慢首屏，再改成首屏后异步补丁（需要新的 `page.review` 消息与还原语义）。
+
+## F4 设置页
+
+- 「审校服务（可选）」下拉：列出所有已配置的 LLM provider +「不审校」。
+- 微软卡片：`API Key`、`Region`（可空）、`baseUrl`；提示“微软不支持请求级术语表，术语靠规则校验 + 审校修正”。
+- 结果提示：`已审校 N 段，修正 M 段`；不显示 1–10 分。
+- 隐私说明：页面文本会发给微软；配置了审校时还会发给所选 LLM。
+
+## F5 验收
+
+- 接口：真 key 下 3 段中译、顺序、`zh-Hans`、region 头、429 重试；确认不触发 50k/1k 限额。
+- A/B（四页，同目标语言）：
+  - MT only vs MT + 审校；
+  - 记录首屏时间、总耗时、请求数、MT 字符数、LLM token、送审段数、修正段数、术语保留率；
+  - 人工抽检 20 段：修正是否真的更好；如果修正率/收益低于阈值，**不上审校层**。
+- 回归：`check` / `smoke` / `smoke:dom` / 词库 `--check` 全绿；现有 provider 不受影响。
+
+## F 风险
+
+- 微软 F0 每小时 2M 字符、滑动窗口；大页面要控速，别把额度打空。
+- 区域头漏发会 401；global 资源可省，区域资源必填。
+- MT 质量与 DeepL/LLM 不同，专有名词更弱；术语必须靠 F2/F3。
+- 混排（一段 MT、一段修正）语气可能不一致；双语模式同屏可见。
+- 多一个第三方数据流向；设置页和 README 要写清楚。
+- 第二 provider 的选择/存储/还原语义比单 provider 复杂，先做同步审校，异步补丁另开一步。
+
+---
+
 # 施工约束（给执行者）
 
 - 不加大依赖；`package.json` 最多增加 `scripts` 条目。
@@ -1563,6 +1643,23 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 - `models.list` 的缓存写入必须走 `patchProvider`，不要用设置页 draft 覆盖已保存配置。
 - 任何测试/示例/文档不得出现真实 key；OpenCode Go 的 session 是随机 UUID，不是密钥，但也不要写进仓库。
 - 调试 OpenCode Go 时先确认 `x-opencode-session` 有值；漏发就是全网 400，这是最容易踩的一脚。
+
+## 参考实现与借鉴边界（2026-10-23 追加）
+
+开发阶段遇到同类问题时（分批、并发、视口优先、错误恢复、设置页交互），**允许并且鼓励**先查阅
+[KISS Translator](https://github.com/fishjar/kiss-translator) 的实现与默认值，再自己写；不要闭门造车，
+也不要重复踩别人已经踩过的坑。当前已借鉴的点：
+
+- 分批/并发默认值：KISS 10,000 字符 / 10 路并发 / 400ms 批间隔；我们据此把 4,000/4 调到 8,000/8。
+- 视口优先：KISS 的 `transAllnow=false` + `rootMargin=500` 懒加载思路，用于阶段 E。
+- 各家关闭思考的参数差异：对照它的 provider 适配经验，避免给强制思考模型发错误字段。
+
+**边界（必须遵守）**：
+
+- KISS Translator 是 **GPL-3.0**。只借鉴**思路、行为、参数经验**，**不复制源码、prompt、文案或资源文件**，
+  也不把它作为依赖引入——GPL-3.0 的 copyleft 会污染本仓库。
+- 每次借鉴都要在计划或 commit message 里写清楚：借鉴了什么、为什么、落在哪个文件；实现和测试必须是自己的。
+- 只把 KISS 当参考，不把它当标准：它的默认后端是微软 MT，和我们的 LLM 路径不是同一类，参数不能照搬。
 
 ---
 
@@ -1597,4 +1694,6 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
 - 双语/纯译文切换后自动重翻（只提示用户还原后重翻）。
 - 为 provider 写各自的重复请求实现——一律走协议层。
 - 为 `models.list` 做后台定时刷新或跨设备同步。
+- 全量 AI 评分 / 评分仪表盘；AI 只做定点修正。
+- Custom Translator 训练（微软的术语表要走训练，成本与维护都不划算）。
 - Firefox 兼容、打包工具、运行时依赖。
