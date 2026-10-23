@@ -225,7 +225,9 @@ async function runBatch(args, allowSplit) {
  * @param {string[]} [args.glossary]
  * @param {Record<string, string>} [args.extraHeaders]
  * @param {{ delays: number[] }} [args.retry]
- * @returns {Promise<{ translations: string[], review: import('../../types').ReviewOutcome }>}
+ * @param {number} [args.maxSegments] 本页剩余可送审段数
+ * @param {number} [args.maxChars] 本页剩余可送审字符数
+ * @returns {Promise<{ translations: string[], review: import('../../types').ReviewOutcome, usedChars: number }>}
  */
 export async function reviewTranslations({
   sources,
@@ -236,17 +238,33 @@ export async function reviewTranslations({
   glossary = [],
   extraHeaders,
   retry,
+  maxSegments,
+  maxChars,
 }) {
   const protocol = getProtocol(config.protocol);
   const compiled = compileGlossary(Array.isArray(glossary) ? glossary : []);
-  const { items, truncated } = findSuspicious({ sources, translations, compiled, targetCode });
+  const { items, truncated } = findSuspicious({
+    sources,
+    translations,
+    compiled,
+    targetCode,
+    ...(typeof maxSegments === 'number' ? { maxSegments } : {}),
+    ...(typeof maxChars === 'number' ? { maxChars } : {}),
+  });
+  const usedChars = items.reduce(
+    (sum, item) =>
+      sum +
+      String(sources[item.index] ?? '').length +
+      String(translations[item.index] ?? '').length,
+    0,
+  );
   const base = { reviewed: items.length, corrected: 0, failed: false, truncated };
 
   // 审校服务必须是能接收 prompt 的 LLM；配成 MT 说明配置有问题，直接标记失败
   if (protocol.supportsGlossary === false) {
-    return { translations, review: { ...base, failed: true } };
+    return { translations, review: { ...base, failed: true }, usedChars };
   }
-  if (items.length === 0) return { translations, review: base };
+  if (items.length === 0) return { translations, review: base, usedChars };
 
   try {
     const request = buildReviewRequest({ target, items, sources, translations });
@@ -262,16 +280,17 @@ export async function reviewTranslations({
       userContent: request.userContent,
     });
     if (corrected.length !== items.length) {
-      return { translations, review: { ...base, failed: true } };
+      return { translations, review: { ...base, failed: true }, usedChars };
     }
     const applied = applyReviewCorrections({ sources, translations, items, corrected, compiled });
     return {
       translations: applied.translations,
       review: { ...base, corrected: applied.corrected },
+      usedChars,
     };
   } catch (err) {
     console.warn('[sopen-translate] 审校失败，保留主译文', err);
-    return { translations, review: { ...base, failed: true } };
+    return { translations, review: { ...base, failed: true }, usedChars };
   }
 }
 

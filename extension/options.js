@@ -623,8 +623,11 @@ providersEl.addEventListener('change', (event) => {
   if (field === 'apiKey' && !isMtProvider(provider) && String(value ?? '').trim().length > 8) {
     void refreshModels(Number(target.dataset.index));
   }
-  // 切到 MT（DeepL / 微软）要隐藏模型字段，切回来要恢复
-  if (field === 'protocol') renderProviders();
+  // 切到 MT（DeepL / 微软 / Google）要隐藏模型字段，切回来要恢复；审校下拉也跟着变
+  if (field === 'protocol') {
+    renderProviders();
+    renderReviewProviders();
+  }
 });
 
 providersEl.addEventListener('click', async (event) => {
@@ -709,6 +712,7 @@ addBtn.addEventListener('click', () => {
   draft.providers.push(provider);
   if (!draft.activeProviderId) draft.activeProviderId = provider.id;
   renderProviders();
+  renderReviewProviders();
   setSaved('已添加，填好字段后保存');
 });
 
