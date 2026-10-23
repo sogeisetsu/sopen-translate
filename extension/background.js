@@ -15,6 +15,7 @@ import { getPreset } from './lib/provider-presets.js';
 import { loadModelList, resolveModelsUrl } from './lib/models.js';
 import { normalizeTerms } from './lib/glossary.js';
 import { reviewTranslations, translateBatch } from './lib/providers.js';
+import { REVIEW_MAX_CHARS, REVIEW_MAX_SEGMENTS } from './lib/review.js';
 
 /** @typedef {import('../types').ProviderConfig} ProviderConfig */
 /** @typedef {import('../types').Settings} Settings */
@@ -26,6 +27,33 @@ const MODELS_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
 let glossaryCache = null;
 /** @type {Promise<string[]> | null} */
 let builtinTermsCache = null;
+
+/** 审校预算按页面 token 累计，1 小时后清掉；避免 service worker 长期占用内存 */
+const REVIEW_BUDGET_TTL = 60 * 60 * 1000;
+const REVIEW_BUDGET_MAX_TOKENS = 50;
+/** @type {Map<string, { segments: number, chars: number, at: number }>} */
+const reviewBudgets = new Map();
+
+/**
+ * @param {string} token
+ * @returns {{ segments: number, chars: number, at: number }}
+ */
+function reviewBudget(token) {
+  const now = Date.now();
+  for (const [key, value] of reviewBudgets) {
+    if (now - value.at > REVIEW_BUDGET_TTL) reviewBudgets.delete(key);
+  }
+  let budget = reviewBudgets.get(token);
+  if (!budget) {
+    budget = { segments: 0, chars: 0, at: now };
+    reviewBudgets.set(token, budget);
+    if (reviewBudgets.size > REVIEW_BUDGET_MAX_TOKENS) {
+      const oldest = reviewBudgets.keys().next().value;
+      if (oldest) reviewBudgets.delete(oldest);
+    }
+  }
+  return budget;
+}
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   if (reason !== 'install') return;
@@ -50,7 +78,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 function route(message) {
   switch (message?.type) {
     case 'translate':
-      return translate(message.texts);
+      return translate(message.texts, message.pageToken);
     case 'testProvider':
       return testProvider(message.config, message.sample);
     case 'status':
@@ -121,8 +149,11 @@ async function sessionHeaders(provider) {
   return { 'x-opencode-session': await getSessionId() };
 }
 
-/** @param {string[]} texts */
-async function translate(texts) {
+/**
+ * @param {string[]} texts
+ * @param {string} [pageToken] content 每轮页面翻译生成；用于累计审校预算
+ */
+async function translate(texts, pageToken) {
   const list = normalizeTexts(texts);
   const { settings, provider } = await getActiveProvider();
   if (!provider) throw new Error('还没有配置翻译服务，先去设置页添加一个');
@@ -148,17 +179,32 @@ async function translate(texts) {
     ? settings.providers.find((p) => p.id === settings.reviewProviderId)
     : null;
   if (reviewProvider) {
-    const reviewed = await reviewTranslations({
-      sources: list,
-      translations,
-      config: reviewProvider,
-      target: settings.targetLang,
-      targetCode: settings.targetLangCode,
-      glossary,
-      extraHeaders: await sessionHeaders(reviewProvider),
-    });
-    translations = reviewed.translations;
-    review = reviewed.review;
+    const token = typeof pageToken === 'string' && pageToken ? pageToken : 'default';
+    const budget = reviewBudget(token);
+    const remainingSegments = Math.max(0, REVIEW_MAX_SEGMENTS - budget.segments);
+    const remainingChars = Math.max(0, REVIEW_MAX_CHARS - budget.chars);
+
+    if (remainingSegments === 0 || remainingChars === 0) {
+      // 本页审校预算用完：主译文照常返回，不再送审
+      review = { reviewed: 0, corrected: 0, failed: false, truncated: true };
+    } else {
+      const reviewed = await reviewTranslations({
+        sources: list,
+        translations,
+        config: reviewProvider,
+        target: settings.targetLang,
+        targetCode: settings.targetLangCode,
+        glossary,
+        extraHeaders: await sessionHeaders(reviewProvider),
+        maxSegments: remainingSegments,
+        maxChars: remainingChars,
+      });
+      translations = reviewed.translations;
+      review = reviewed.review;
+      budget.segments += reviewed.review.reviewed;
+      budget.chars += reviewed.usedChars;
+      budget.at = Date.now();
+    }
   }
 
   return {

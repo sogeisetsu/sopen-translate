@@ -1039,6 +1039,43 @@ await test('review 上限：最多 200 段，超出标记 truncated', async () =
   assert.equal(found.truncated, true);
 });
 
+await test('review 预算：maxSegments 限制本页送审段数，0 时不发请求', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(chatResult(['Kubernetes 简介']), { status: 200 });
+  };
+
+  const limited = await reviewTranslations({
+    sources: ['Kubernetes 简介', 'Kubernetes 部署'],
+    translations: ['简介', '部署'],
+    config: chatConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+    maxSegments: 1,
+  });
+  assert.equal(limited.review.reviewed, 1);
+  assert.equal(limited.review.truncated, true);
+  assert.equal(limited.review.corrected, 1);
+  assert.ok(limited.usedChars > 0);
+  assert.equal(calls, 1);
+
+  calls = 0;
+  const none = await reviewTranslations({
+    sources: ['Kubernetes 简介'],
+    translations: ['简介'],
+    config: chatConfig,
+    target: '简体中文',
+    targetCode: 'ZH-HANS',
+    glossary: ['Kubernetes'],
+    maxSegments: 0,
+  });
+  assert.equal(none.review.reviewed, 0);
+  assert.equal(none.review.truncated, true);
+  assert.equal(calls, 0, '预算为 0 时不应发审校请求');
+});
+
 /* ------------------------------ 审校请求 ------------------------------ */
 
 await test('review：修正可疑段，按顺序对齐并保留术语', async () => {

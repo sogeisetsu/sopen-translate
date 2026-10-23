@@ -106,6 +106,8 @@
     cleanups: [],
     /** @type {Policy | null} */
     policy: null,
+    /** 本轮页面翻译的 token：后台按它累计审校预算，还原/重新翻译时换新的 */
+    pageToken: '',
   };
 
   /** @type {HTMLDivElement | null} */
@@ -122,7 +124,11 @@
    * @returns {Promise<{ translations: string[], protected: number, warnings: { index: number, missing: string[] }[], review?: { reviewed: number, corrected: number, failed: boolean, truncated: boolean } }>}
    */
   async function requestTranslate(texts) {
-    const res = await chrome.runtime.sendMessage({ type: 'translate', texts });
+    const res = await chrome.runtime.sendMessage({
+      type: 'translate',
+      texts,
+      pageToken: state.pageToken,
+    });
     if (!res) throw new Error('扩展后台没有响应，重新加载一下扩展');
     if (!res.ok) throw new Error(res.error || '翻译失败');
     const translations = Array.isArray(res.translations) ? res.translations : [];
@@ -739,6 +745,7 @@
     state.paused = false;
     state.pendingScan = false;
     state.policy = null;
+    state.pageToken = '';
     state.progress = { done: 0, total: 0 };
   }
 
@@ -1259,6 +1266,8 @@
     try {
       // 每轮都从原文出发：上一轮没还原就先还原，避免译文被二次翻译
       resetPage();
+      // 审校预算按“这一轮页面翻译”累计，滚动续翻共用同一个 token
+      state.pageToken = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       const page = await readPageSettings();
       state.mode = page.mode;
       state.scope = page.scope;
