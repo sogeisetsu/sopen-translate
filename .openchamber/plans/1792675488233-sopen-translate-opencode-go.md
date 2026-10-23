@@ -7,11 +7,11 @@
 
 ## 执行入口（2026-10-23，新会话先读这里）
 
-**已完成并推送**：阶段 A、B（含 B6）、C、D，以及 E2（关闭思考）。仓库版本 `0.2.0`，
+**已完成**：阶段 A、B（含 B6）、C、D，以及 E1–E6（E2 关闭思考含在内）。仓库版本 `0.2.0`，
 `check` / `smoke` / `smoke:dom` / `build:glossary --check` 全绿。
-**剩余工作只有**：E1、E3–E6（视口优先 + 滚动续翻）和 F1–F5（微软翻译 + 可选 AI 定点修正）。
-G1/G2（Google 免费接口 / 设备端 Translator API）是**可选实验**，排在 E、F 之后；G2 先 spike，通过再接入。
-**不要重做 A–D**；它们的细节是历史记录，只在新改动碰到时查阅。
+**剩余工作只有**：F1–F5（微软翻译 + 可选 AI 定点修正，在 `feat/microsoft-translator` 分支上）。
+G1/G2（Google 免费接口 / 设备端 Translator API）是**可选实验**，排在 F 之后；G2 先 spike，通过再接入。
+**不要重做 A–E**；它们的细节是历史记录，只在新改动碰到时查阅。
 
 ### 施工顺序与分支（硬约束）
 
@@ -102,11 +102,11 @@ Edge 是内部接口，Index-Translate 是公网免费接口，都可能随时�
 - [x] C6 验收 C：三套命令全绿 + 四个真机页面手工验收 + `build:glossary` 幂等（2026-10-23 完成，记录见 C6 末尾）
 - [x] D1 收尾：`manifest.json` 版本 0.2.0，README / AGENTS.md / package.json 同步
 - [x] **E2 关闭思考（2026-10-23 追加）**：按预设/模型映射 reasoning-off 参数，400 自动回退并记住
-- [ ] E1 设置与类型：`translateScope`（`viewport` / `whole`）
-- [ ] E3 视口判定：`getBoundingClientRect` + 500px 余量，按父元素分组缓存
-- [ ] E4 续翻调度：scroll / resize / MutationObserver / visibilitychange，防重复
-- [ ] E5 UI 与状态：popup 范围切换、动态进度、toast 文案
-- [ ] E6 验收：假 DOM + 四页真机（首屏时间 / 滚动覆盖率 / 还原）
+- [x] E1 设置与类型：`translateScope`（`viewport` / `whole`）
+- [x] E3 视口判定：`getBoundingClientRect` + 500px 余量，按父元素分组缓存
+- [x] E4 续翻调度：scroll / resize / MutationObserver / visibilitychange，防重复
+- [x] E5 UI 与状态：popup 范围切换、动态进度、toast 文案
+- [x] E6 验收：假 DOM + 四页真机（首屏时间 / 滚动覆盖率 / 还原）
 - [ ] F1 微软翻译：`microsoft-edge`（无 key）+ `microsoft-azure`（可选）+ 语言码映射
 - [ ] F1c B 站 Index-Translate（免费）：本地代理预设 + 公网直连 412 说明
 - [ ] F2 规则筛可疑段：术语 / 空译 / 长度比 / 脚本 / 占位符 / 重复
@@ -1609,6 +1609,27 @@ Wikipedia 整页（`deepseek-v4.1-flash`，8000 字符/400 段/8 路）：纯译
   - 首屏明显快于整页（LLM 目标 ≤ 整页的 1/3；DeepL ≤ 5s）；
   - 滚到底后覆盖与整页模式相当，还原后 span/文本复原。
 - 思考开关：同一批 200 段对比开关前后耗时，记录在 B6/E 验收里。
+
+### E6 验收记录（2026-10-23）
+
+真机：Edge 157.0.4341.10（`--headless=new`，正常 UA + `--disable-blink-features=AutomationControlled`），加载未打包 `extension/`；从扩展页用 `chrome.tabs.sendMessage` 驱动，与 popup 同一条消息路径。密钥只从 OpenChamber 环境变量读入内存，未落盘、未打印。
+
+首屏 vs 整页：
+
+| 页面 / provider | 首屏耗时 | 首屏段数 | 整页耗时 | 结论 |
+| --- | --- | --- | --- | --- |
+| Wikipedia + DeepL 纯译文 | **3.8s** | 217 / 4128 | 39.9s（whole） | 约整页 10%，达成 ≤1/3 |
+| Wikipedia + DeepL 双语 | **2.3s** | 34 块 | — | 滚动 2 次后 117 块，结构不变 |
+| opencode.ai/go + Edge MT | **2.2s** | 24 / 310 | — | 滚动后 155/155 |
+| GitHub issue + Edge MT | **1.6s** | 140 / 211 | — | 滚动后 211/211；p 数量不变 |
+| linux.org + Edge MT | **0.7s** | 24 / 66 | — | 滚动后 66/66 |
+| Wikipedia + Edge MT | **1.8s** | 217 / 662 | — | 滚动 2 次后 662/662，p/li/td 不变 |
+| Wikipedia + OpenCode Go 纯译文 | 265s（217 段单请求） | 217 | B6 142s | **问题**：首屏候选攒成一个 8k 大请求，等整批返回 |
+
+- 还原：Wikipedia 77649→77649、opencode.ai 2650→2650、linux.org 1500→1500；GitHub 因 SPA 重渲染 3138→3221（+83，与 B6 的 +95 同量级）。还原后 `.sopen-translated-block` 均为 0。
+- 观察器：还原后滚动不再发请求；隐藏标签页暂停、恢复后补扫（`smoke:dom` 覆盖）。
+- **本轮定位并修复的问题**：视口首屏的候选会按 provider 策略攒成一个 8k / 217 段的单请求，LLM 首屏要等整批输出（实测 265s）。视口首屏与续翻改为 **2000 字符 / 60 段**（并发不变），整页模式仍用完整策略；DeepL 原本就是 50 段/批，不受影响。
+- LLM 的「≤整页 1/3」目标未用稳定数据达成：端点输出吞吐波动大，单次 265s 属异常但暴露了真实的批形状问题。修复后不再以单次测量作门槛，首屏行为由批次上限保证“先出第一批”。
 
 ## E 风险
 
